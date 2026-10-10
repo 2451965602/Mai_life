@@ -3259,9 +3259,11 @@ class V11412WebuiHistoryTests(unittest.IsolatedAsyncioTestCase):
         timestamps = [float(p["ts"]) for p in points]
         self.assertEqual(timestamps, sorted(timestamps))
         for point in points:
-            self.assertEqual(set(point), {"ts", "energy", "hunger", "mood_valence",
+            self.assertEqual(set(point), {"ts", "time", "energy", "hunger", "mood_valence",
                                           "mood_arousal", "sleep_phase"},
                              f"point 字段超出契约: {sorted(point)}")
+            # time 是图表 x 轴直接渲染的字段：MM-DD HH:MM，不能是裸 epoch。
+            self.assertRegex(point["time"], r"^\d{2}-\d{2} \d{2}:\d{2}$")
         self.assertEqual(points[-1]["sleep_phase"], "light_sleep")
         self.assertAlmostEqual(float(points[-1]["hunger"]), 30.0)
 

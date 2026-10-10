@@ -117,7 +117,7 @@
 | API（查询别名惯用同名） | 返回结构（节选） |
 |---|---|
 | `webui_status_overview` | `bot_name, version, generated_at`；`state{energy,hunger,mood_valence,mood_arousal,mood_label,sleep_phase_zh,current_activity,current_location,health_note}`；`schedule{current{kind,kind_zh,summary,location,start,end,window},next{kind_zh,summary,start},next_summary,scene{scene,applied}}`；`weather,day_type,upcoming_festival`；`sleep{phase_zh,kind_zh,grace_until,woken_count,last_event,defer_until,started_at}`；`linkage{drawpic_enabled,drawpic_detected}`；`services{llm_health,available_tasks,background_tasks,active_bursts,active_groups,users_summary,diary_last_day,narrative_note,news_count,exploration_count,search_history_count,last_failure,group_observations,archived_today,pending_inspirations}`；`recall{enabled,cache_enabled,latest{user_id,summary,media_types,age}}` |
-| `webui_status_history` | `points[{ts,energy,hunger,mood_valence,mood_arousal,sleep_phase}]`（近 72 小时快照，升序，可空） |
+| `webui_status_history` | `points[{ts,time,energy,hunger,mood_valence,mood_arousal,sleep_phase}]`（近 72 小时快照，升序，可空）；`time` 为 `MM-DD HH:MM` 字符串（按环境时区），**图表 x 轴必须绑 `time` 而不是 `ts`**——绑 `ts` 会把裸 epoch 秒渲染成坐标轴标签 |
 | `webui_information_digest` | `status{information_enabled,news_enabled,search_enabled,sources,recent_news,recent_explorations,recent_search_history}`；`news[{title,summary,url,content,age,score}]`≤10 + `news_full_text`（含来源链接的全文拼接）；`explorations[{topic,query,summary,sources_text,age,score}]`≤10 + `explorations_full_text`；`search_history[{time,operation,query,provider_type,success,result_count,error_class,results_digest,duration_ms}]`≤20 |
 | `webui_bookshelf_overview` | `counts{documents,private_documents,creation_runs}`；`creation{enabled,plaintext_acknowledged,archived_today,pending_inspirations,daily_max}`；`books[{doc_type,title,privacy,status,updated_age,summary,content}]`≤20 + `books_full_text`；`runs[{document_id,title,status,started_at}]`；`latest_work{title,privacy,content}`（正文全量） |
 | `webui_schedule` | `day,generated_at`；`current/next/scene`（同 overview.schedule）；`nodes[{start,end,kind_zh,summary,location,scene,energy_load,shareability}]`；`tomorrow{day,nodes}` |
@@ -177,7 +177,7 @@ WebUIExtension.model_validate_json(open('webui.json', encoding='utf-8-sig').read
 
 【现有数据契约（节选，完整版见随附文档第 6 节）】
 - webui_status_overview：生活状态/日程当前与下一节点/天气节日/睡眠相位与休息闸门运行时/服务运行态/撤回摘要
-- webui_status_history：近 72 小时状态快照 points[{ts,energy,hunger,mood_valence,mood_arousal,sleep_phase}]（图表用）
+- webui_status_history：近 72 小时状态快照 points[{ts,time,energy,hunger,mood_valence,mood_arousal,sleep_phase}]（图表 x 绑 time，MM-DD HH:MM）
 - webui_schedule：今日/明日节点表 nodes[{start,end,kind_zh,summary,location,scene,energy_load,shareability}]
 - webui_users：用户关系 users[{user_id,display_name,role,temperature,stage,proactive_count,daily_proactive_max,last_message_age,last_proactive_age,recent}]
 - webui_memories：日记与梦境全量（latest_diary/latest_dream 正文不截断、diaries≤20 带 content + diaries_full_text、dreams≤20 带全文）

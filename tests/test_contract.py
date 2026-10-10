@@ -29,7 +29,7 @@ class ContractTests(unittest.TestCase):
         manifest=json.loads((root/"_manifest.json").read_text(encoding="utf-8-sig"))
         requirements=(root/"requirements.txt").read_text(encoding="utf-8")
         readme=(root/"README.md").read_text(encoding="utf-8")
-        self.assertEqual(manifest["version"],"1.14.14")
+        self.assertEqual(manifest["version"],"1.14.15")
         self.assertIn("playwright>=1.49,<2",requirements)
         self.assertIn("python -m playwright install chromium",readme)
         self.assertIn("Playwright/Bing",readme)
@@ -38,10 +38,10 @@ class ContractTests(unittest.TestCase):
         from Mai_life.config import PLUGIN_VERSION
         from Mai_life.information.http_client import _USER_AGENT
         root=Path(__file__).parents[1]
-        self.assertEqual(PLUGIN_VERSION,"1.14.14")
+        self.assertEqual(PLUGIN_VERSION,"1.14.15")
         self.assertIn(f"Mai_life/{PLUGIN_VERSION}",_USER_AGENT)
         self.assertNotIn("1.9.2",_USER_AGENT)
-        # 菜单、管理概览与入口的显示版本必须统一为 1.14.14，不允许残留旧版本号。
+        # 菜单、管理概览与入口的显示版本必须统一为 1.14.15，不允许残留旧版本号。
         for relative in ("plugin.py","management/admin_service.py","messaging/menu_renderer.py",
                          "information/http_client.py","core/environment.py","config.py",
                          "README.md","_manifest.json"):
@@ -322,9 +322,14 @@ class WebuiApiContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(points),2)
         self.assertEqual([p["ts"] for p in points],sorted(p["ts"] for p in points))  # 按时间升序
         for point in points:
-            self.assertEqual(set(point),{"ts","energy","hunger","mood_valence","mood_arousal","sleep_phase"})
+            self.assertEqual(set(point),{"ts","time","energy","hunger","mood_valence",
+                                         "mood_arousal","sleep_phase"})
             for key in ("energy","hunger","mood_valence","mood_arousal"):
                 self.assertEqual(round(float(point[key]),1),float(point[key]))  # 一位小数
+            # time 是图表 x 轴直接渲染的字段：必须是 MM-DD HH:MM 字符串，不能是裸 epoch。
+            self.assertRegex(point["time"], r"^\d{2}-\d{2} \d{2}:\d{2}$")
+            expected=datetime.fromtimestamp(point["ts"],tz=self.now.tzinfo).strftime("%m-%d %H:%M")
+            self.assertEqual(point["time"], expected)
 
     async def test_webui_information_digest_full_text_for_owner(self):
         now=self.now.timestamp()

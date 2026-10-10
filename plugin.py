@@ -1,4 +1,4 @@
-"""Mai_life v1.14.14 插件入口。"""
+"""Mai_life v1.14.15 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -2260,8 +2260,12 @@ class MaiLifePlugin(MaiBotPlugin):
         try:
             if not (self._store and self._env):return {"success":False,"error":"not_ready"}
             assert self._store and self._env
-            rows=await self._store.recent_state_snapshots(self._env.now().timestamp(),hours=72)
-            return {"points":[{"ts":float(row.get("ts") or 0),"energy":round(float(row.get("energy") or 0),1),
+            now=self._env.now()
+            rows=await self._store.recent_state_snapshots(now.timestamp(),hours=72)
+            # time 给图表 x 轴用（MM-DD HH:MM，按环境时区）；ts 保留给需要精确值的场景。
+            return {"points":[{"ts":float(row.get("ts") or 0),
+                               "time":_hhmm_text(row.get("ts"),now) or "—",
+                               "energy":round(float(row.get("energy") or 0),1),
                                "hunger":round(float(row.get("hunger") or 0),1),
                                "mood_valence":round(float(row.get("mood_valence") or 0),1),
                                "mood_arousal":round(float(row.get("mood_arousal") or 0),1),

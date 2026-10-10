@@ -201,7 +201,7 @@
                 "field": "points"
               },
               "chart_type": "line",
-              "x": "ts",
+              "x": "time",
               "y": "energy"
             },
             {
@@ -212,7 +212,7 @@
                 "field": "points"
               },
               "chart_type": "line",
-              "x": "ts",
+              "x": "time",
               "y": "hunger"
             },
             {
@@ -223,7 +223,7 @@
                 "field": "points"
               },
               "chart_type": "line",
-              "x": "ts",
+              "x": "time",
               "y": "mood_valence"
             },
             {
@@ -234,7 +234,7 @@
                 "field": "points"
               },
               "chart_type": "line",
-              "x": "ts",
+              "x": "time",
               "y": "mood_arousal"
             }
           ]
