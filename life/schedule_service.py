@@ -11,6 +11,37 @@ from typing import Any
 
 _ALLOWED={"meal","work","study","travel","leisure","sleep","nap","rest"}
 
+# 身份信号只从人格串里读已经写明的内容，不替用户假定身份；不同人的麦麦身份不同。
+_IDENTITY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("学生", "大学", "本科", "研究生", "硕士", "博士", "在读", "留学生",
+      "大一", "大二", "大三", "大四", "高二", "高三", "初中生", "中学生"), "student"),
+    (("上班", "职场", "打工人", "程序员", "工程师", "设计师", "产品经理", "老师",
+      "教师", "医生", "护士", "研究员", "编辑", "运营", "实习", "会计", "律师"), "worker"),
+    (("自由职业", "创作者", "写作者", "画师", "博主", "up主", "主播", "自媒体", "独立开发"), "creator"),
+    (("居家", "家庭主妇", "全职妈妈", "全职爸爸", "退休"), "homebody"),
+)
+_IDENTITY_NOTES: dict[str, str] = {
+    "student": ("人格表明麦麦是学生：工作日的在校段必须写成具体方向的上课、自习、实验、社团或赶作业"
+                "（例如'上午去教学楼听两门课''下午在图书馆整理笔记''晚上在宿舍赶课程论文'），"
+                "地点用学校、教室、图书馆、食堂、宿舍；不要编造固定课表，每天课程主题可以不同，周末可以离校活动。"),
+    "worker": ("人格表明麦麦已经工作：白天段必须写成通勤、工位上的具体事务、午休或加班"
+               "（例如'上午通勤后在工位赶项目进度''午休时下楼买咖啡''晚上加班整理方案'），地点用公司、工位、通勤路上。"),
+    "creator": ("人格表明麦麦是自由创作者：白天段必须写成具体的创作、约稿、整理素材或学习技法"
+                "（例如'上午在家画商稿的线稿''下午整理作品集''晚上学新的绘画技法'），地点以家里和工作室为主。"),
+    "homebody": ("人格表明麦麦以居家生活为主：白天段写成具体的家务、采买、照顾家人或兴趣手艺"
+                 "（例如'上午买菜做饭并打扫家里''下午打理阳台的花草''晚上做手工'），地点以家里和社区为主。"),
+}
+_GENERIC_IDENTITY_NOTE = ("如果人格里写明了身份（如学生、上班族、自由职业者），日程必须体现该身份的日常"
+                          "（学生写上课/自习方向，职场写通勤/工位事务方向），概括到方向即可；"
+                          "人格没有写明身份时按普通人的日常安排，不要假定特定身份。")
+# 回落模板按身份定向时只改 work/study 段的方向与地点，时间结构不动。
+_IDENTITY_FALLBACK: dict[str, dict[str, tuple[str, str]]] = {
+    "student": {"work": ("上午去学校上课", "学校"), "study": ("下午上课或去图书馆自习", "学校")},
+    "worker": {"work": ("到公司处理工作事务", "公司"), "study": ("学习专业技能或收尾未完成的方案", "公司")},
+    "creator": {"work": ("在家处理创作委托", "家里"), "study": ("学新技法并整理素材", "家里")},
+    "homebody": {"work": ("打理家务和日常采买", "家里"), "study": ("做兴趣手艺或收拾家里", "家里")},
+}
+
 
 def to_minute(text: str, *, allow_day_end: bool=False) -> int | None:
     try:
@@ -29,7 +60,7 @@ def hhmm(value: int) -> str:
 class ScheduleService:
     def __init__(self, store: Any, config: Any, llm: Any, plugin_dir: str, logger: Any, bot_name: str = "麦麦") -> None:
         self.store=store; self.config=config; self.llm=llm; self.plugin_dir=Path(plugin_dir); self.logger=logger
-        self.bot_name=bot_name
+        self.bot_name=bot_name; self._personality=""
 
     def update_config(self, config: Any) -> None:
         self.config=config
@@ -37,6 +68,10 @@ class ScheduleService:
     def set_bot_name(self,name:str)->None:
         clean=str(name or "").strip()
         if clean:self.bot_name=clean
+
+    def set_personality(self,personality:str)->None:
+        """人格串含身份信息（如"大二学生"），回落模板按它定向；不同用户的麦麦身份不同。"""
+        self._personality=str(personality or "")
 
     def _template(self) -> dict[str, Any]:
         root=self.plugin_dir.resolve()
@@ -66,7 +101,31 @@ class ScheduleService:
         template=self._template(); key="weekend" if weekend else "workday"; raw=template.get(key)
         # 模板即使是数组也可能缺睡眠或进餐；校验失败必须回到稳定内置骨架。
         validated=self._validate(day,raw) if isinstance(raw,list) else []
-        return validated or self._validate(day,builtin)
+        return self._apply_identity(validated or self._validate(day,builtin),self._personality)
+
+    # 身份信号只从人格串里读已经写明的内容，不替用户假定身份；不同人的麦麦身份不同。
+    @staticmethod
+    def _identity_kind(personality: str) -> str:
+        text=str(personality or "")
+        for words,kind in _IDENTITY_RULES:
+            if any(word in text for word in words): return kind
+        return ""
+
+    def _identity_note(self, personality: str) -> str:
+        return _IDENTITY_NOTES.get(self._identity_kind(personality), _GENERIC_IDENTITY_NOTE)
+
+    def _apply_identity(self, nodes: list[dict[str, Any]], personality: str) -> list[dict[str, Any]]:
+        """回落模板按人格身份定向：只改 work/study 段的方向与地点，时间结构不动。"""
+        plan=_IDENTITY_FALLBACK.get(self._identity_kind(personality))
+        if not plan: return nodes
+        result=[]
+        for item in nodes:
+            node=dict(item)
+            if node.get("kind") in plan:
+                summary,location=plan[str(node["kind"])]
+                node["summary"]=summary; node["location"]=location
+            result.append(node)
+        return result
 
     def _state_summary(self, state: dict[str, Any] | None) -> str:
         """把当前精力/饥饿/心情浓缩成一句中文提示，供日程生成参考。"""
@@ -162,6 +221,8 @@ class ScheduleService:
                          environment: dict[str,Any]|None=None) -> list[dict[str, Any]]:
         day=now.strftime("%Y-%m-%d"); existing=await self.store.get_framework(day)
         if existing and not force: return existing
+        # 人格串是身份的唯一来源：刷新到实例，回落模板与提示词都按它定向。
+        self._personality=str(personality or "")
         state=await self.store.get_state()
         weekend=now.weekday()>=5; fallback=self._apply_memory_hints(day,self._fallback(day,weekend),memory_context)
         variety=await self._variety_context(now)
@@ -189,15 +250,18 @@ class ScheduleService:
             variety=(variety+"\n今天可以考虑的活动灵感（自由选用，不要硬塞）："+ "、".join(picked)).strip()
         prompt=(f"为虚拟网友{self.bot_name}生成{day}的生活框架。{'周末' if weekend else '工作日'}，天气背景：{weather_text}。\n"
                 f"人格：{personality or '自然、独立、有自己的生活'}\n"
+                f"身份落实：{self._identity_note(personality)}\n"
                 f"{self._state_summary(state)}\n"
                 f"参考节奏（只参考时间结构和比例，禁止照抄里面的描述）："
                 f"{json.dumps(self._template().get('weekend' if weekend else 'workday',[]),ensure_ascii=False)}\n"
                 f"匿名生活记忆：{json.dumps(memory_context or {},ensure_ascii=False)}。日期提示不含用户身份，不得猜测是谁。"
                 f"{variety}\n"
                 "要求：\n"
-                "1) 每个节点的 summary 必须具体到'正在做什么'（例如'给连载小说写第三章''玩两把新出的游戏''整理相册并修图'），"
+                "1) 每个节点的 summary 必须具体到'正在做什么'（例如'上午去教学楼听两门课''给连载小说写第三章''玩两把新出的游戏'），"
                 "禁止'处理自己的事情''放松、看东西和随便逛逛'这类空泛描述；\n"
-                "2) 工作/学习段写清楚主题方向，休闲段每天至少有一件事与最近几天不同；\n"
+                "2) 工作/学习段必须与上面的人格身份一致（学生写上课/自习/社团方向，职场写通勤/工位事务方向，"
+                "自由创作者写约稿/创作方向），location 与身份匹配（学生多用学校、图书馆、食堂、宿舍，"
+                "职场多用公司、工位）；休闲段每天至少有一件事与最近几天不同；\n"
                 "3) 节假日、节气、农历和天气要自然反映在活动里；\n"
                 "4) 日程应符合普通人的时间、精力和生活常识，不安排突兀的高强度事项，时间不重叠，包含夜间睡眠和至少两顿饭；\n"
                 "5) energy_load 是该节点对全天精力的影响合计值：工作/学习 -2~-6，睡眠 +4~+8，餐饮 -1，休闲 -1~-3，"
@@ -230,9 +294,10 @@ class ScheduleService:
             fallback={"scene":node["summary"],"state_deltas":self._state_deltas(node),
                       "opportunities":([{"topic":node["summary"],"motive":"想自然分享一点正在经历的生活","weight":node["shareability"],"privacy":"normal"}] if node["shareability"]>=0.35 else [])}
             prompt=(f"把生活框架细化为具体但克制的场景。框架：{json.dumps(node,ensure_ascii=False)}\n"
+                    f"人格：{self._personality or '自然、独立、有自己的生活'}\n"
                     f"当前精力{state.get('energy')}、饥饿{state.get('hunger')}、天气{weather_text}。\n"
                     "返回JSON对象：scene字符串和opportunities数组。机会字段topic,motive,weight。"
-                    "不要凭空制造重大事件，不要强行想用户。")
+                    "场景必须与人格身份一致（学生写在校场景，职场写工位场景），不要凭空制造重大事件，不要强行想用户。")
             raw=fallback
             if self.llm.task_available("scene_detail"):
                 raw=await self.llm.generate_json(prompt,"你是日常场景细化器，只返回JSON对象。",fallback,max_tokens=900,task_kind="scene_detail",request_type="scene_detail")

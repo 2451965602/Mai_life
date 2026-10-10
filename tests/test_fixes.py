@@ -4447,10 +4447,10 @@ class V11412WebuiJsonStructureTests(unittest.TestCase):
 class V11412WebuiApiRegistryTests(unittest.TestCase):
     """v1.14.12：manifest 版本号与 11 个 WebUI 只读 API 的注册形态。"""
 
-    def test_manifest_version_is_1_14_12(self):
+    def test_manifest_version_is_current(self):
         manifest = json.loads((Path(__file__).parents[1] / "_manifest.json").read_text(
             encoding="utf-8-sig"))
-        self.assertEqual(manifest["version"], "1.14.12")
+        self.assertEqual(manifest["version"], PLUGIN_VERSION)
 
     def test_webui_apis_are_registered_private_with_matching_names(self):
         plugin = MaiLifePlugin()
@@ -4843,5 +4843,175 @@ class V11412GateSegmentTypeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("正在rest", llm.prompts[0])
 
 
+# ==========v1.14.13 日程身份贴合==========
+
+
+class V11413ScheduleIdentityTests(unittest.IsolatedAsyncioTestCase):
+    """v1.14.13：人格串里的身份必须落到日程——学生有上课、职场有通勤，粒度概括到方向。
+
+    身份只从 Host 的 personality.personality 读已写明的内容（不同用户的麦麦身份不同），
+    分两条路径生效：LLM 提示词身份落实块 + 回落模板按身份定向（回落是多数路径）。
+    """
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.now = datetime(2026, 10, 12, 3, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    def _service(self, llm: Any = None) -> ScheduleService:
+        return ScheduleService(self.store, self.config, llm or DummyLLM(),
+                               str(Path(__file__).parents[1]), DummyLogger())
+
+    def _kinds(self, nodes: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+        return {str(node.get("kind")): (str(node.get("summary") or ""), str(node.get("location") or ""))
+                for node in nodes}
+
+    async def test_identity_kind_reads_only_written_identity(self):
+        service = self._service()
+        for personality, expected in (
+            ("大二学生，女生，平时住校", "student"),
+            ("研究生，在读博士", "student"),
+            ("在互联网公司上班的产品经理", "worker"),
+            ("中学老师，教语文", "worker"),
+            ("自由插画师，接商稿", "creator"),
+            ("家庭主妇，照顾孩子", "homebody"),
+            ("现在正在上网和群友聊天。聊天偏日常。", ""),
+            ("", ""),
+        ):
+            self.assertEqual(service._identity_kind(personality), expected, personality)
+
+    def test_identity_notes_are_actionable(self):
+        service = self._service()
+        student = service._identity_note("大二学生")
+        self.assertIn("上课", student)
+        self.assertIn("学校", student)
+        self.assertIn("不要编造固定课表", student)  # 粒度：概括到方向
+        worker = service._identity_note("程序员")
+        self.assertIn("通勤", worker)
+        self.assertIn("工位", worker)
+        # 没有人身身份时提示词只要求"按普通人安排"，不假定身份。
+        generic = service._identity_note("聊天偏日常")
+        self.assertIn("不要假定特定身份", generic)
+
+    async def test_fallback_workday_flavored_by_student_identity(self):
+        service = self._service()
+        service.set_personality("大二学生，女生，住校")
+        kinds = self._kinds(service._fallback("2026-10-12", weekend=False))
+        self.assertEqual(kinds["work"], ("上午去学校上课", "学校"))
+        self.assertEqual(kinds["study"], ("下午上课或去图书馆自习", "学校"))
+
+    async def test_fallback_flavored_by_other_identities(self):
+        service = self._service()
+        cases = {
+            "在互联网公司上班的产品经理": ("到公司处理工作事务", "公司"),
+            "自由插画师，接商稿": ("在家处理创作委托", "家里"),
+            "家庭主妇，照顾孩子": ("打理家务和日常采买", "家里"),
+        }
+        for personality, expected in cases.items():
+            service.set_personality(personality)
+            kinds = self._kinds(service._fallback("2026-10-12", weekend=False))
+            self.assertEqual(kinds["work"], expected, personality)
+
+    async def test_fallback_unchanged_without_identity(self):
+        """人格串没写身份时保持通用模板，不替用户假定身份。"""
+        service = self._service()
+        service.set_personality("现在正在上网和群友聊天。聊天偏日常。")
+        kinds = self._kinds(service._fallback("2026-10-12", weekend=False))
+        self.assertEqual(kinds["work"], ("处理积压的私信和待办清单", "书桌前"))
+
+    async def test_identity_flavoring_keeps_time_structure(self):
+        """只改方向与地点，时间结构、kind、精力载荷不动。"""
+        service = self._service()
+        generic = {n["start_minute"]: (n["end_minute"], n["kind"], n["energy_load"])
+                   for n in service._fallback("2026-10-12", weekend=False)}
+        service.set_personality("大二学生")
+        flavored = {n["start_minute"]: (n["end_minute"], n["kind"], n["energy_load"])
+                    for n in service._fallback("2026-10-12", weekend=False)}
+        self.assertEqual(generic, flavored)
+
+    async def test_ensure_day_prompt_carries_identity_requirements(self):
+        class CapturingLLM(DummyLLM):
+            def __init__(self):
+                super().__init__(); self.prompt = ""
+            def task_available(self, kind): return kind == "schedule"
+            async def generate_json(self, prompt, system, fallback=None, max_tokens=0, **kwargs):
+                self.prompt = str(prompt); return fallback
+
+        llm = CapturingLLM()
+        service = self._service(llm)
+        await service.ensure_day(self.now, "大二学生，女生，住校", "晴", force=True)
+        self.assertIn("人格：大二学生，女生，住校", llm.prompt)
+        self.assertIn("身份落实：", llm.prompt)
+        self.assertIn("上午去教学楼听两门课", llm.prompt)  # 学生示例
+        self.assertIn("必须与上面的人格身份一致", llm.prompt)
+        self.assertIn("学校、图书馆、食堂、宿舍", llm.prompt)  # 地点要求
+
+    async def test_ensure_day_stores_identity_flavored_fallback_without_model(self):
+        """模型不可用（或调用失败）时，落地的框架也必须带身份方向。"""
+        service = self._service()
+        await service.ensure_day(self.now, "大二学生，女生，住校", "晴", force=True)
+        nodes = await self.store.get_framework("2026-10-12")
+        kinds = self._kinds(nodes)
+        self.assertEqual(kinds["work"], ("上午去学校上课", "学校"))
+        self.assertEqual(kinds["study"], ("下午上课或去图书馆自习", "学校"))
+
+    async def test_ensure_day_uses_generic_prompt_without_identity(self):
+        class CapturingLLM(DummyLLM):
+            def __init__(self):
+                super().__init__(); self.prompt = ""
+            def task_available(self, kind): return kind == "schedule"
+            async def generate_json(self, prompt, system, fallback=None, max_tokens=0, **kwargs):
+                self.prompt = str(prompt); return fallback
+
+        llm = CapturingLLM()
+        service = self._service(llm)
+        await service.ensure_day(self.now, "现在正在上网和群友聊天。聊天偏日常。", "晴", force=True)
+        self.assertIn("人格：现在正在上网和群友聊天。聊天偏日常。", llm.prompt)
+        self.assertIn("不要假定特定身份", llm.prompt)
+
+    async def test_scene_prompt_keeps_identity_consistent(self):
+        class CapturingLLM(DummyLLM):
+            def __init__(self):
+                super().__init__(); self.prompt = ""
+            def task_available(self, kind): return True
+            async def generate_json(self, prompt, system, fallback=None, max_tokens=0, **kwargs):
+                self.prompt = str(prompt); return fallback
+
+        llm = CapturingLLM()
+        service = self._service(llm)
+        await service.ensure_day(self.now, "大二学生，女生，住校", "晴", force=True)
+        nodes = await self.store.get_framework("2026-10-12")
+        await service.expand_due(datetime(2026, 10, 12, 10, 0, tzinfo=TZ), nodes,
+                                 {"energy": 50, "hunger": 30}, "晴")
+        self.assertIn("人格：大二学生，女生，住校", llm.prompt)
+        self.assertIn("与人格身份一致", llm.prompt)
+
+    async def test_personality_survives_reload_via_apply_bot_name(self):
+        """插件在当天生成后重载：ensure_day 会早退，人格必须经 _apply_bot_name 再分发一次。"""
+
+        class PersonalityCtx(DummyCtx):
+            class _Config:
+                async def get(self, key, default=None):
+                    return "大二学生，女生，住校" if key == "personality.personality" else default
+
+            def __init__(self):
+                super().__init__()
+                self.config = PersonalityCtx._Config()
+
+        plugin = await build_plugin(self.store, self.config, users=[UserProfile(user_id="10001", role="owner")])
+        plugin._set_context(PersonalityCtx())
+        await plugin._refresh_personality()
+        self.assertEqual(plugin._personality, "大二学生，女生，住校")
+        self.assertEqual(plugin._schedule._personality, "大二学生，女生，住校")
+        kinds = self._kinds(plugin._schedule._fallback("2026-10-12", weekend=False))
+        self.assertEqual(kinds["work"], ("上午去学校上课", "学校"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+

@@ -1,4 +1,4 @@
-"""Mai_life v1.14.12 插件入口。"""
+"""Mai_life v1.14.13 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -536,6 +536,10 @@ class MaiLifePlugin(MaiBotPlugin):
                        self._information,self._relay,self._creation):
             setter=getattr(target,"set_bot_name",None)
             if setter:setter(self._bot_name)
+        # 人格串是日程身份定向的唯一来源：刷新时同步给日程服务，
+        # 保证插件在当天生成后重载，回落模板仍按身份走（ensure_day 早退时不会刷新）。
+        setter=getattr(self._schedule,"set_personality",None)
+        if setter:setter(self._personality)
 
     async def _check_drawpic(self)->bool:
         """检测麦麦绘图插件是否已注册；异常时限流告警并按未安装处理。"""
