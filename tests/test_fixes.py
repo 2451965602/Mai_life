@@ -3992,7 +3992,8 @@ class V11412WebuiConfigSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(data["plugin"]), {"enabled", "version"})
         self.assertEqual(data["plugin"], {"enabled": "开启", "version": PLUGIN_VERSION})
         self.assertEqual(data["users"], {"configured": 2, "enabled": 1})
-        self.assertEqual(data["models"], {"fast_task": "fast-x", "reasoning_task": "reason-x"})
+        self.assertEqual(data["models"], {"fast_task": "fast-x", "reasoning_task": "reason-x",
+                                        "max_output_tokens": "不限制"})
         self.assertEqual(set(data["environment"]), {"timezone", "city", "weather_refresh_minutes"})
         self.assertEqual(data["environment"]["city"], "杭州")
         self.assertEqual(data["environment"]["weather_refresh_minutes"], 45)
@@ -5009,6 +5010,75 @@ class V11413ScheduleIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin._schedule._personality, "大二学生，女生，住校")
         kinds = self._kinds(plugin._schedule._fallback("2026-10-12", weekend=False))
         self.assertEqual(kinds["work"], ("上午去学校上课", "学校"))
+
+
+# ==========v1.14.14 输出预算与任务路由==========
+
+
+class V11414OutputBudgetTests(unittest.TestCase):
+    """v1.14.14：输出 token 上限改配置驱动（默认不限制），调用点不得再写死正数。"""
+
+    def test_production_call_sites_have_no_hardcoded_positive_cap(self):
+        """推理模型的思考链占用输出预算：写死小上限会把正文挤成空响应。"""
+        root = Path(__file__).parents[1]
+        offenders: list[str] = []
+        for path in sorted(root.rglob("*.py")):
+            if "tests" in path.parts or "__pycache__" in path.parts:
+                continue
+            if path.name == "llm_service.py":
+                continue  # 预算解析本身在这里
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or "max_tokens=" not in line:
+                    continue
+                value = line.split("max_tokens=", 1)[1].lstrip()
+                if not value.startswith("0"):
+                    offenders.append(f"{path.name}:{number} {stripped[:60]}")
+        self.assertEqual(offenders, [])
+
+    def test_schedule_calls_inherit_configured_budget(self):
+        class CapturingLLM(DummyLLM):
+            def __init__(self):
+                super().__init__(); self.seen: list[int] = []
+            def task_available(self, kind): return kind == "schedule"
+            async def generate_json(self, prompt, system, fallback=None, max_tokens=0, **kwargs):
+                self.seen.append(max_tokens); return fallback
+
+        async def run() -> list[int]:
+            tmp = tempfile.TemporaryDirectory()
+            store = LifeStore(tmp.name); await store.initialize()
+            try:
+                llm = CapturingLLM()
+                service = ScheduleService(store, MaiLifeSettings(), llm,
+                                          str(Path(__file__).parents[1]), DummyLogger())
+                await service.ensure_day(datetime(2026, 10, 12, 3, 0, tzinfo=TZ),
+                                         "大二学生", "晴", force=True)
+                return llm.seen
+            finally:
+                await store.close(); tmp.cleanup()
+
+        self.assertEqual(asyncio.run(run()), [0])  # 0 = 继承配置，不再写死 2200/12000
+
+    def test_config_summary_reports_output_budget(self):
+        async def run() -> dict[str, Any]:
+            tmp = tempfile.TemporaryDirectory()
+            store = LifeStore(tmp.name); await store.initialize()
+            try:
+                cfg = MaiLifeSettings()
+                plugin = await build_plugin(store, cfg)
+                plugin.set_plugin_config(cfg.model_dump(mode="python"))
+                summary = await plugin.webui_config_summary()
+                cfg.models.max_output_tokens = 640
+                plugin.set_plugin_config(cfg.model_dump(mode="python"))
+                capped = await plugin.webui_config_summary()
+                return {"default": summary["models"]["max_output_tokens"],
+                        "capped": capped["models"]["max_output_tokens"]}
+            finally:
+                await store.close(); tmp.cleanup()
+
+        result = asyncio.run(run())
+        self.assertEqual(result["default"], "不限制")
+        self.assertEqual(result["capped"], "640")
 
 
 if __name__ == "__main__":

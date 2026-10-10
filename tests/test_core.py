@@ -23,6 +23,23 @@ class DummyLogger:
     def __getattr__(self, name): return lambda *args, **kwargs: None
 
 
+class _Ctx:
+    """最小 ctx：只带 logger 与可注入的 llm 替身。"""
+
+    def __init__(self, llm=None, logger=None):
+        self.llm = llm
+        self.logger = logger if logger is not None else DummyLogger()
+
+
+class _RecordingLogger:
+    def __init__(self): self.lines: list[str] = []
+    def _log(self, text): self.lines.append(str(text))
+    def info(self, text, *a, **k): self._log(text)
+    def warning(self, text, *a, **k): self._log(text)
+    def error(self, text, *a, **k): self._log(text)
+    def debug(self, text, *a, **k): self._log(text)
+
+
 class DummyLLM:
     def task_available(self,kind): return False
     async def generate(self, *args, **kwargs): return ""
@@ -839,6 +856,78 @@ class LLMRouteTests(unittest.TestCase):
         self.assertEqual(asyncio.run(service.generate("你好", task_kind="reasoning")), "ok")
         self.assertEqual(captured["task_name"], "planner")
         self.assertEqual(captured["model"], "")
+
+    def test_schedule_and_scene_default_to_fast_task(self):
+        """v1.14.14：日程/场景细化默认走快模型——慢推理模型一次 27-30 秒会撞穿 30 秒超时。"""
+        service = self._make_service(None)
+        self.assertEqual(service.task_for("schedule"), "utils")
+        self.assertEqual(service.task_for("scene_detail"), "utils")
+        config = MaiLifeSettings()
+        config.models.schedule_task = "planner"
+        config.models.scene_detail_task = "replyer"
+        service = LLMService(_Ctx(), config, None)
+        self.assertEqual(service.task_for("schedule"), "planner")
+        self.assertEqual(service.task_for("scene_detail"), "replyer")
+
+    def test_output_limit_defaults_to_unlimited(self):
+        """v1.14.14：默认不限制（0）；显式正数优先，全局配置兜底。"""
+        service = self._make_service(None)
+        self.assertIsNone(service._output_limit(0))
+        self.assertEqual(service._output_limit(900), 900)
+        config = MaiLifeSettings()
+        config.models.max_output_tokens = 800
+        service = LLMService(_Ctx(), config, None)
+        self.assertEqual(service._output_limit(0), 800)
+        self.assertEqual(service._output_limit(300), 300)  # 调用方显式值仍优先
+
+    def test_generate_omits_max_tokens_when_unlimited(self):
+        captured = {}
+        class NewSDKLLM:
+            async def generate(self, prompt, **kwargs):
+                captured.update(kwargs)
+                return {"success": True, "response": "ok"}
+            async def get_available_models(self): return ["planner"]
+        service = self._make_service(NewSDKLLM())
+        self.assertEqual(asyncio.run(service.generate("你好", max_tokens=0)), "ok")
+        self.assertNotIn("max_tokens", captured)  # None 时压根不下发该字段
+
+    def test_generate_sends_configured_cap(self):
+        captured = {}
+        class NewSDKLLM:
+            async def generate(self, prompt, model="", temperature=None, max_tokens=None,
+                               *, task_name="utils", model_name="", **kwargs):
+                captured.update({"max_tokens": max_tokens})
+                return {"success": True, "response": "ok"}
+            async def get_available_models(self): return ["planner"]
+        config = MaiLifeSettings(); config.models.max_output_tokens = 640
+        service = LLMService(_Ctx(NewSDKLLM()), config, None)
+        self.assertEqual(asyncio.run(service.generate("你好")), "ok")
+        self.assertEqual(captured["max_tokens"], 640)
+
+    def test_empty_response_with_reasoning_is_reported(self):
+        """v1.14.14：推理模型把预算烧在思考链上时正文为空，必须与"答了但解析失败"区分开。"""
+        class ReasoningOnlyLLM:
+            async def generate(self, prompt, model="", temperature=None, max_tokens=None,
+                               *, task_name="utils", model_name="", **kwargs):
+                return {"success": True, "response": "", "reasoning": "让我想想……" * 50}
+            async def get_available_models(self): return ["planner"]
+        logger = _RecordingLogger()
+        service = LLMService(_Ctx(ReasoningOnlyLLM(), logger), MaiLifeSettings(), None)
+        self.assertEqual(asyncio.run(service.generate("你好")), "")
+        text = chr(10).join(logger.lines)
+        self.assertIn("模型只返回思考链", text)
+        self.assertIn("response=", text)
+
+    def test_empty_response_without_reasoning_stays_quiet(self):
+        class EmptyLLM:
+            async def generate(self, prompt, model="", temperature=None, max_tokens=None,
+                               *, task_name="utils", model_name="", **kwargs):
+                return {"success": True, "response": ""}
+            async def get_available_models(self): return ["planner"]
+        logger = _RecordingLogger()
+        service = LLMService(_Ctx(EmptyLLM(), logger), MaiLifeSettings(), None)
+        self.assertEqual(asyncio.run(service.generate("你好")), "")
+        self.assertNotIn("模型只返回思考链", chr(10).join(logger.lines))
 
     def test_old_sdk_routes_by_model_field(self):
         captured = {}

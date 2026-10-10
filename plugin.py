@@ -1,4 +1,4 @@
-"""Mai_life v1.14.13 插件入口。"""
+"""Mai_life v1.14.14 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -581,7 +581,7 @@ class MaiLifePlugin(MaiBotPlugin):
         try:
             result=await asyncio.wait_for(
                 self._llm.generate_json(prompt,"你是保守的生活分享判定器，只输出JSON。",{},
-                                        max_tokens=200,task_kind="relevance",request_type="moment_share_judge"),
+                                        max_tokens=0,task_kind="relevance",request_type="moment_share_judge"),
                 timeout=3.2,
             )
         except Exception as exc:
@@ -2562,7 +2562,8 @@ class MaiLifePlugin(MaiBotPlugin):
             cfg=self.config; profiles=cfg.users.profiles; gate=cfg.rest_gate
             return {"plugin":{"enabled":_switch(cfg.plugin.enabled),"version":PLUGIN_VERSION},
                     "users":{"configured":len(profiles),"enabled":sum(1 for item in profiles if item.enabled)},
-                    "models":{"fast_task":str(cfg.models.fast_task),"reasoning_task":str(cfg.models.reasoning_task)},
+                    "models":{"fast_task":str(cfg.models.fast_task),"reasoning_task":str(cfg.models.reasoning_task),
+                                   "max_output_tokens":(str(int(cfg.models.max_output_tokens)) if int(cfg.models.max_output_tokens)>0 else "不限制")},
                     "environment":{"timezone":str(cfg.environment.timezone),"city":str(cfg.environment.city),
                                    "weather_refresh_minutes":int(cfg.environment.weather_refresh_minutes)},
                     "linkage":{"drawpic_enabled":_switch(cfg.linkage.drawpic_enabled),

@@ -147,7 +147,7 @@ class GroupObserver:
             "返回 JSON：{\"public\":bool,\"score\":0到1,\"topic\":\"不含人名的短主题\"}\n"
             f"群消息片段：\n{joined}"
         )
-        data=await self.llm.generate_json(prompt,"你是保守的群聊隐私整理器。",fallback,max_tokens=500,
+        data=await self.llm.generate_json(prompt,"你是保守的群聊隐私整理器。",fallback,max_tokens=0,
                                           task_kind="group_judgment",request_type="group_judgment")
         if not isinstance(data,dict):return fallback
         topic=" ".join(str(data.get("topic") or "").split())[:120]
@@ -163,7 +163,7 @@ class GroupObserver:
                 "必须去掉姓名、QQ号、逐字原句、群聊冲突、隐私和安全事件，只保留普通成员错过后可能想知道的公共信息。\n"
                 f"片段：\n{joined}"
             )
-            generated=await self.llm.generate(summary_prompt,"你是匿名化的群聊转述摘要器。",max_tokens=300,
+            generated=await self.llm.generate(summary_prompt,"你是匿名化的群聊转述摘要器。",max_tokens=0,
                                               task_kind="relay_summary",request_type="relay_summary")
             if generated:summary=" ".join(generated.split())[:600]
         # 模型摘要再次经过轻量本地保护，避免明显账号、网址和 @ 名称进入数据库。

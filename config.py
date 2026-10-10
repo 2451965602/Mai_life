@@ -12,7 +12,7 @@ import re
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import ValidationInfo, field_validator, model_validator
 
-PLUGIN_VERSION = "1.14.13"
+PLUGIN_VERSION = "1.14.14"
 CONFIG_SCHEMA_VERSION = "1.11.0"
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -970,9 +970,9 @@ class ModelRoutingSettings(PluginConfigBase):
     __ui_order__: ClassVar[int] = 19
 
     fast_task: str = Field(default="utils", description="快速整理任务名。", json_schema_extra=_ui("快速任务", "默认 utils，用于连续话题等轻量任务。", 0, label_en="Fast Task", hint_en="MaiBot task name for lightweight analysis."))
-    reasoning_task: str = Field(default="planner", description="推理任务名。", json_schema_extra=_ui("推理任务", "默认 planner，用于日程和复杂判断。", 1, label_en="Reasoning Task", hint_en="MaiBot task name for reasoning."))
+    reasoning_task: str = Field(default="planner", description="推理任务名。", json_schema_extra=_ui("推理任务", "默认 planner，用于搜索规划、自我关联等复杂判断（日程与场景已改走快速任务）。", 1, label_en="Reasoning Task", hint_en="MaiBot task name for reasoning."))
     creative_task: str = Field(default="replyer", description="创作任务名。", json_schema_extra=_ui("创作任务", "默认 replyer，用于梦境和叙事文本。", 2, label_en="Creative Task", hint_en="MaiBot task name for narrative generation."))
-    schedule_task: str = Field(default="", description="日程任务覆盖。", json_schema_extra=_ui("日程任务覆盖", "留空继承推理任务。", 4, label_en="Schedule Override", hint_en="Leave empty to inherit reasoning task."))
+    schedule_task: str = Field(default="", description="日程任务覆盖。", json_schema_extra=_ui("日程任务覆盖", "留空继承快速任务；日程是结构化 JSON 任务，慢推理模型容易撞 30 秒超时。", 4, label_en="Schedule Override", hint_en="Leave empty to inherit fast task; slow reasoning models hit the 30s timeout."))
     rest_wakeup_task: str = Field(default="", description="判醒任务覆盖。", json_schema_extra=_ui("判醒任务覆盖", "留空继承快速任务。", 5, label_en="Wake Decision Override", hint_en="Leave empty to inherit fast task."))
     continuity_task: str = Field(default="", description="连续话题任务覆盖。", json_schema_extra=_ui("话题整理任务覆盖", "留空继承快速任务。", 6, label_en="Continuity Override", hint_en="Leave empty to inherit fast task."))
     dream_task: str = Field(default="", description="梦境任务覆盖。", json_schema_extra=_ui("梦境任务覆盖", "留空继承创作任务。", 7, label_en="Dream Override", hint_en="Leave empty to inherit creative task."))
@@ -988,8 +988,11 @@ class ModelRoutingSettings(PluginConfigBase):
     creation_review_task: str = Field(default="", description="创作审校任务覆盖。", json_schema_extra=_ui("创作审校任务覆盖", "留空继承推理任务。", 19, label_en="Creation Review Override", hint_en="Leave empty to inherit reasoning task."))
     reading_annotation_task: str = Field(default="", description="阅读批注任务覆盖。", json_schema_extra=_ui("阅读批注任务覆盖", "留空继承创作任务。", 20, label_en="Reading Annotation Override", hint_en="Leave empty to inherit creative task."))
     scene_detail_task: str = Field(default="", description="临近场景细化任务覆盖。", json_schema_extra=_ui(
-        "场景细化任务覆盖", "留空继承推理任务。", 21,
-        label_en="Scene Detail Override", hint_en="Leave empty to inherit reasoning task."))
+        "场景细化任务覆盖", "留空继承快速任务；同日程，慢推理模型容易撞 30 秒超时。", 21,
+        label_en="Scene Detail Override", hint_en="Leave empty to inherit fast task; slow reasoning models hit the 30s timeout."))
+
+
+    max_output_tokens: int = Field(default=0, ge=0, description="模型输出 token 上限；0=不限制，由服务商决定。", json_schema_extra=_ui("输出 token 上限", "0=不限制（推荐）。推理模型的思考链占用输出预算，写死小上限会把正文挤成空响应；仅在对成本敏感时设正数。", 22, label_en="Max Output Tokens", hint_en="0 = unlimited (provider decides). Tight caps starve content on reasoning models."))
 
 
 class UsageSettings(PluginConfigBase):

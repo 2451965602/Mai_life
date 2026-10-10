@@ -134,7 +134,7 @@ class RestGate:
                 "\"should_reply\":true/false,\"reason\":\"一句话\"}。普通闲聊应继续睡。"
             )
             result=await self.llm.generate_json(
-                prompt,"你是保守的休息判醒器，只输出JSON。",{},max_tokens=220,
+                prompt,"你是保守的休息判醒器，只输出JSON。",{},max_tokens=0,
                 task_kind="rest_wakeup",request_type="rest_wakeup",
             )
             def value(name:str)->int:

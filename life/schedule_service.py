@@ -270,7 +270,7 @@ class ScheduleService:
                 "kind只能是meal/work/study/travel/leisure/sleep/nap/rest。")
         raw=fallback
         if self.llm.task_available("schedule"):
-            raw=await self.llm.generate_json(prompt,"你是生活日程规划器，只输出合法JSON数组。",fallback,max_tokens=2200,task_kind="schedule",request_type="daily_schedule")
+            raw=await self.llm.generate_json(prompt,"你是生活日程规划器，只输出合法JSON数组。",fallback,max_tokens=0,task_kind="schedule",request_type="daily_schedule")
         nodes=self._validate(day,raw,state) or fallback
         await self.store.replace_framework(day,nodes); return await self.store.get_framework(day)
 
@@ -300,7 +300,7 @@ class ScheduleService:
                     "场景必须与人格身份一致（学生写在校场景，职场写工位场景），不要凭空制造重大事件，不要强行想用户。")
             raw=fallback
             if self.llm.task_available("scene_detail"):
-                raw=await self.llm.generate_json(prompt,"你是日常场景细化器，只返回JSON对象。",fallback,max_tokens=900,task_kind="scene_detail",request_type="scene_detail")
+                raw=await self.llm.generate_json(prompt,"你是日常场景细化器，只返回JSON对象。",fallback,max_tokens=0,task_kind="scene_detail",request_type="scene_detail")
             if not isinstance(raw,dict): raw=fallback
             scene=str(raw.get("scene") or fallback["scene"])[:500]
             deltas=self._state_deltas(node)

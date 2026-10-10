@@ -21,12 +21,14 @@ class LLMService:
     def update_config(self, config: Any) -> None:
         self.config = config
 
-    def _generate_call(self, task: str, messages: Any, temperature: float, max_tokens: int) -> dict[str, Any]:
+    def _generate_call(self, task: str, messages: Any, temperature: float, max_tokens: int | None) -> dict[str, Any]:
         """构造 llm.generate 调用参数，兼容新旧 SDK 的任务路由契约。
 
         SDK 2.8.1 起签名含 task_name 且缺省无条件发送 ``utils``，导致 Host 把
         ``model`` 当具体模型名解析而报"未找到模型"；必须显式传 task_name。
         更旧的 SDK 没有该参数，``model`` 即任务名（Host 兼容分支仍支持）。
+        max_tokens 为 None 时不下发该字段，由服务商决定（推理模型的思考会占用
+        输出预算，写死小上限会把正文挤成空响应）。
         """
         if self._supports_task_name is None:
             try:
@@ -34,10 +36,21 @@ class LLMService:
                 self._supports_task_name = "task_name" in params
             except (TypeError, ValueError):
                 self._supports_task_name = False
+        call = {"prompt": messages, "temperature": temperature}
+        if max_tokens is not None:
+            call["max_tokens"] = max_tokens
         if self._supports_task_name:
-            return {"prompt": messages, "model": "", "temperature": temperature,
-                    "max_tokens": max_tokens, "task_name": task}
-        return {"prompt": messages, "model": task, "temperature": temperature, "max_tokens": max_tokens}
+            call.update({"model": "", "task_name": task})
+        else:
+            call["model"] = task
+        return call
+
+    def _output_limit(self, max_tokens: int) -> int | None:
+        """解析输出上限：调用方传正数优先，否则用全局配置；0 或未配 = 不限制。"""
+        if max_tokens and max_tokens > 0:
+            return int(max_tokens)
+        configured = int(getattr(self.config.models, "max_output_tokens", 0) or 0)
+        return configured if configured > 0 else None
 
     def task_for(self, kind: str) -> str:
         """解析具体任务覆盖与基础角色回退，最终返回 MaiBot 的模型任务名。"""
@@ -46,8 +59,11 @@ class LLMService:
             "fast": models.fast_task,
             "reasoning": models.reasoning_task,
             "creative": models.creative_task,
-            "schedule": models.schedule_task or models.reasoning_task,
-            "scene_detail": models.scene_detail_task or models.reasoning_task,
+            # 日程与场景细化是结构化 JSON 任务：默认走快模型。慢推理模型（如
+            # step-5-preview）生成一次要 27-30 秒，会撞穿 Host 的 30 秒 cap.call
+            # 超时；需要推理质量时用 schedule_task / scene_detail_task 显式覆盖。
+            "schedule": models.schedule_task or models.fast_task,
+            "scene_detail": models.scene_detail_task or models.fast_task,
             "rest_wakeup": models.rest_wakeup_task or models.fast_task,
             "continuity": models.continuity_task or models.fast_task,
             "dream": models.dream_task or models.creative_task,
@@ -121,10 +137,13 @@ class LLMService:
         except Exception as exc:
             self.ctx.logger.debug(f"[MaiLife] Token 统计写入失败: {exc}")
 
-    async def generate(self, prompt: str | list[dict[str, Any]], system: str = "", max_tokens: int = 1800,
+    async def generate(self, prompt: str | list[dict[str, Any]], system: str = "", max_tokens: int = 0,
                        temperature: float = 0.5, *, task_kind: str = "reasoning",
                        request_type: str = "generic") -> str:
-        """统一调用 Host 模型并记录插件侧用量；失败时返回空串供业务规则降级。"""
+        """统一调用 Host 模型并记录插件侧用量；失败时返回空串供业务规则降级。
+
+        max_tokens 传 0 表示用全局配置（models.max_output_tokens，默认 0=不限制）。
+        """
         task=self.task_for(task_kind)
         messages: str | list[dict[str, Any]] = prompt
         if system:
@@ -132,15 +151,22 @@ class LLMService:
                 messages=[{"role":"system","content":system},{"role":"user","content":prompt}]
             elif isinstance(prompt,list):
                 # 列表消息已自带 system 时保留调用方意图；否则在列表前补一条 system，
-                # 避免调用方按“消息列表”传参时 system 被静默丢弃。
+                # 避免调用方按"消息列表"传参时 system 被静默丢弃。
                 has_system=any(isinstance(item,dict) and str(item.get("role") or "").casefold()=="system"
                                for item in prompt)
                 messages=prompt if has_system else [{"role":"system","content":system},*prompt]
         started=time.perf_counter(); result:dict[str,Any]={}
         try:
-            result=await self.ctx.llm.generate(**self._generate_call(task,messages,temperature,max_tokens))
+            result=await self.ctx.llm.generate(**self._generate_call(task,messages,temperature,
+                                                                     self._output_limit(max_tokens)))
             success=bool(isinstance(result,dict) and result.get("success") and result.get("response"))
             failure_reason=str(result.get("error") or "empty_response") if isinstance(result,dict) else "invalid_result"
+            if not success and isinstance(result,dict) and result.get("reasoning"):
+                # 推理模型把输出预算烧在思考上时正文为空：只记长度不记正文，便于区分
+                # "模型没答"与"答了但解析失败"。
+                self.ctx.logger.warning(
+                    f"[MaiLife] 模型只返回思考链 task={task} type={request_type} "
+                    f"reasoning={len(str(result.get('reasoning')))} chars response=空")
             await self._record(result=result if isinstance(result,dict) else {},task=task,
                                request_type=request_type,started=started,success=success,
                                error="" if success else failure_reason)
@@ -150,7 +176,7 @@ class LLMService:
             self.ctx.logger.warning(f"[MaiLife] LLM 调用失败 task={task} type={request_type}: {exc}")
         return ""
 
-    async def generate_json(self, prompt: str, system: str, fallback: Any, max_tokens: int = 1800,
+    async def generate_json(self, prompt: str, system: str, fallback: Any, max_tokens: int = 0,
                             *, task_kind: str = "reasoning", request_type: str = "structured") -> Any:
         """从纯响应、Markdown 代码块或首个 JSON 边界中解析结构化结果。"""
         raw=await self.generate(prompt,system,max_tokens=max_tokens,task_kind=task_kind,request_type=request_type)
