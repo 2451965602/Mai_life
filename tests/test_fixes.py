@@ -3253,9 +3253,15 @@ class V11412WebuiHistoryTests(unittest.IsolatedAsyncioTestCase):
         data = await plugin.webui_status_history()
         self.assertIn("points", data)
         points = data["points"]
-        self.assertEqual(len(points), 3, f"应只返回 72h 内的三条快照: {points}")
-        # 能量值递增既验证升序，也验证窗口外的两条被排除。
-        self.assertEqual([float(p["energy"]) for p in points], [50.0, 51.5, 52.5])
+        # 渲染器是类别轴：稀疏快照必须重采样到 2 小时均匀网格，否则 1 小时与 9 小时
+        # 的间隔在图上一样宽。窗口 48h→现在 共 25 个网格点。
+        self.assertEqual(len(points), 25, f"应返回 48h/2h+1 个网格点: {len(points)}")
+        gaps = {round(float(points[i + 1]["ts"]) - float(points[i]["ts"]))
+                for i in range(len(points) - 1)}
+        self.assertEqual(gaps, {7200}, f"网格间隔必须均匀: {gaps}")
+        # 网格点取该时刻最近一次快照：48h 与 24h 两条各覆盖 12 格，最后取 30 分钟前那条。
+        energies = [float(p["energy"]) for p in points]
+        self.assertEqual(energies, [50.0] * 12 + [51.5] * 12 + [52.5])
         timestamps = [float(p["ts"]) for p in points]
         self.assertEqual(timestamps, sorted(timestamps))
         for point in points:
@@ -3266,6 +3272,22 @@ class V11412WebuiHistoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertRegex(point["time"], r"^\d{2}-\d{2} \d{2}:\d{2}$")
         self.assertEqual(points[-1]["sleep_phase"], "light_sleep")
         self.assertAlmostEqual(float(points[-1]["hunger"]), 30.0)
+
+    async def test_irregular_snapshot_gaps_resample_to_uniform_grid(self):
+        """快照间隔 1 小时和 8 小时混排时，图表 x 轴仍必须均匀（类别轴等宽分格）。"""
+        plugin = await self._plugin()
+        now = time.time()
+        await self._seed_snapshot(now - 10 * 3600, 40.0)   # 8 小时缺口后第一条
+        await self._seed_snapshot(now - 9 * 3600, 41.0)    # 紧邻 1 小时
+        await self._seed_snapshot(now - 1 * 3600, 42.0)    # 又一个 8 小时缺口
+        points = (await plugin.webui_status_history())["points"]
+        self.assertGreaterEqual(len(points), 5)
+        gaps = {round(float(points[i + 1]["ts"]) - float(points[i]["ts"]))
+                for i in range(len(points) - 1)}
+        self.assertEqual(gaps, {7200})
+        # 网格起点是第一条快照，不虚构更早的历史。
+        self.assertAlmostEqual(float(points[0]["ts"]), float(int((now - 10 * 3600) // 3600 * 3600)), delta=1)
+        self.assertEqual(float(points[0]["energy"]), 40.0)
 
     async def test_points_empty_without_snapshots(self):
         plugin = await self._plugin()

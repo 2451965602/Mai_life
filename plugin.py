@@ -1,4 +1,4 @@
-"""Mai_life v1.14.15 插件入口。"""
+"""Mai_life v1.14.16 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -2262,14 +2262,24 @@ class MaiLifePlugin(MaiBotPlugin):
             assert self._store and self._env
             now=self._env.now()
             rows=await self._store.recent_state_snapshots(now.timestamp(),hours=72)
-            # time 给图表 x 轴用（MM-DD HH:MM，按环境时区）；ts 保留给需要精确值的场景。
-            return {"points":[{"ts":float(row.get("ts") or 0),
-                               "time":_hhmm_text(row.get("ts"),now) or "—",
-                               "energy":round(float(row.get("energy") or 0),1),
-                               "hunger":round(float(row.get("hunger") or 0),1),
-                               "mood_valence":round(float(row.get("mood_valence") or 0),1),
-                               "mood_arousal":round(float(row.get("mood_arousal") or 0),1),
-                               "sleep_phase":str(row.get("sleep_phase") or "")} for row in rows]}
+            # 渲染器是类别轴（等宽分格，与时间值无关）：快照间隔 1 小时和 9 小时会一样宽，
+            # 时间轴就是假的。按 2 小时网格重采样（网格点取该时刻最近一次快照，状态在两次
+            # 快照间视为持稳），x 轴才既均匀又代表真实时间。
+            points=[]
+            if rows:
+                step=2*3600; index=0; cursor=float(rows[0].get("ts") or 0); end=now.timestamp()
+                while cursor<=end+1:
+                    while index+1<len(rows) and float(rows[index+1].get("ts") or 0)<=cursor:
+                        index+=1
+                    row=rows[index]
+                    points.append({"ts":cursor,"time":_hhmm_text(cursor,now) or "—",
+                                   "energy":round(float(row.get("energy") or 0),1),
+                                   "hunger":round(float(row.get("hunger") or 0),1),
+                                   "mood_valence":round(float(row.get("mood_valence") or 0),1),
+                                   "mood_arousal":round(float(row.get("mood_arousal") or 0),1),
+                                   "sleep_phase":str(row.get("sleep_phase") or "")})
+                    cursor+=step
+            return {"points":points}
         except Exception as exc:
             return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
 

@@ -29,7 +29,7 @@ class ContractTests(unittest.TestCase):
         manifest=json.loads((root/"_manifest.json").read_text(encoding="utf-8-sig"))
         requirements=(root/"requirements.txt").read_text(encoding="utf-8")
         readme=(root/"README.md").read_text(encoding="utf-8")
-        self.assertEqual(manifest["version"],"1.14.15")
+        self.assertEqual(manifest["version"],"1.14.16")
         self.assertIn("playwright>=1.49,<2",requirements)
         self.assertIn("python -m playwright install chromium",readme)
         self.assertIn("Playwright/Bing",readme)
@@ -38,10 +38,10 @@ class ContractTests(unittest.TestCase):
         from Mai_life.config import PLUGIN_VERSION
         from Mai_life.information.http_client import _USER_AGENT
         root=Path(__file__).parents[1]
-        self.assertEqual(PLUGIN_VERSION,"1.14.15")
+        self.assertEqual(PLUGIN_VERSION,"1.14.16")
         self.assertIn(f"Mai_life/{PLUGIN_VERSION}",_USER_AGENT)
         self.assertNotIn("1.9.2",_USER_AGENT)
-        # 菜单、管理概览与入口的显示版本必须统一为 1.14.15，不允许残留旧版本号。
+        # 菜单、管理概览与入口的显示版本必须统一为 1.14.16，不允许残留旧版本号。
         for relative in ("plugin.py","management/admin_service.py","messaging/menu_renderer.py",
                          "information/http_client.py","core/environment.py","config.py",
                          "README.md","_manifest.json"):
@@ -321,6 +321,8 @@ class WebuiApiContractTests(unittest.IsolatedAsyncioTestCase):
         points=(await self.plugin.webui_status_history())["points"]
         self.assertEqual(len(points),2)
         self.assertEqual([p["ts"] for p in points],sorted(p["ts"] for p in points))  # 按时间升序
+        # 类别轴等宽分格：网格点间隔必须恒定（2 小时），稀疏快照不得让时间轴失真。
+        self.assertEqual(round(points[1]["ts"]-points[0]["ts"]),7200)
         for point in points:
             self.assertEqual(set(point),{"ts","time","energy","hunger","mood_valence",
                                          "mood_arousal","sleep_phase"})
