@@ -638,10 +638,13 @@ class RestAndStateTests(unittest.IsolatedAsyncioTestCase):
         # 心情增量：经期被轻抑，低于非经期。
         self.assertLess(on["mood_valence"],off["mood_valence"])
 
-    async def test_gate_requires_time_window_and_rest_segment(self):
+    async def test_gate_requires_time_window_or_listed_segment(self):
+        """v1.14.12：时间窗 OR 生效日程类型；sleep 在默认列表内，窗外也拦。"""
         daytime=self.now.replace(hour=10)
         self.config.rest_gate.wake_probability=0
         allowed,reason=await self.gate.decide("1","普通消息",daytime,{"kind":"sleep"})
+        self.assertFalse(allowed); self.assertEqual(reason,"probability:0.00")
+        allowed,reason=await self.gate.decide("1","普通消息",daytime,{"kind":"meal"})
         self.assertTrue(allowed); self.assertEqual(reason,"outside_gate_window")
         self.assertFalse(self.gate._in_window("22:30","08:00","08:00"))
         self.assertFalse(self.gate._in_window("00:00","00:00","00:00"))

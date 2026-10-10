@@ -14,6 +14,7 @@ test_fixes_v1145_gate.py）已合并为本文件，按版本顺序分节，内�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import math
@@ -27,14 +28,14 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from Mai_life.config import MaiLifeSettings, SearchProviderProfile, SocialGroupProfile, UserProfile
+from Mai_life.config import MaiLifeSettings, PLUGIN_VERSION, SearchProviderProfile, SocialGroupProfile, UserProfile
 from Mai_life.core.environment import EnvironmentService
 from Mai_life.core.storage import LifeStore
 from Mai_life.creation.creation_service import CreationService
 from Mai_life.information.http_client import HttpClient, HttpRequestError
 from Mai_life.information.search_providers import ApiProvider, get_provider_strategy
 from Mai_life.information.search_service import SearchService
-from Mai_life.life.bedtime import BedtimeManager
+from Mai_life.life.bedtime import BEDTIME_SILENCE_MINUTES, BedtimeManager
 from Mai_life.life.life_state import LifeStateEngine
 from Mai_life.life.memory_service import MemoryService
 from Mai_life.life.rest_gate import BLOCK_REASON, RestGate
@@ -47,6 +48,7 @@ from Mai_life.messaging.message_pipeline import MessageDebouncer
 from Mai_life.messaging.prompt_builder import PromptBuilder
 from Mai_life.messaging.recall_service import RecallService
 from Mai_life.messaging.task_context import (
+    ActivePluginTask,
     ActiveTaskRegistry,
     HOST_TASK_PREFIX,
     PLUGIN_ID,
@@ -1064,10 +1066,13 @@ class GateTimeWindowTests(unittest.IsolatedAsyncioTestCase):
         allowed, reason = await self.gate.decide(
             "1", "普通消息", datetime(2026, 9, 21, 12, 30, tzinfo=TZ), {"kind": "meal"})
         self.assertFalse(allowed); self.assertEqual(reason, "probability:0.00")
-        # 两个时间窗之外：即使框架写着 sleep 也放行。
+        # 两个时间窗之外：未列入生效类型的日程段放行；sleep 在默认列表内，窗外也拦。
+        allowed, reason = await self.gate.decide(
+            "1", "普通消息", datetime(2026, 9, 21, 10, 0, tzinfo=TZ), {"kind": "meal"})
+        self.assertTrue(allowed); self.assertEqual(reason, "outside_gate_window")
         allowed, reason = await self.gate.decide(
             "1", "普通消息", datetime(2026, 9, 21, 10, 0, tzinfo=TZ), {"kind": "sleep"})
-        self.assertTrue(allowed); self.assertEqual(reason, "outside_gate_window")
+        self.assertFalse(allowed); self.assertEqual(reason, "probability:0.00")
 
     async def test_night_media_only_message_is_blocked(self):
         night = datetime(2026, 9, 21, 23, 0, tzinfo=TZ)
@@ -2923,7 +2928,1920 @@ class V11411LinkageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("component.list_loaded_plugins", manifest["capabilities"])
 
 
+# ==========v1.14.12==========
+# WebUI 重设计：11 个只读 @API 与声明式 webui.json 的契约测试。
+# 覆盖 webui_status_overview / webui_status_history / webui_information_digest /
+# webui_bookshelf_overview / webui_schedule / webui_users / webui_memories /
+# webui_dates / webui_usage / webui_config_summary / webui_admin_summary：
+# 响应键逐字一致、列表条数上限、数值 round 一位小数、布尔转中文开关词、
+# 处理函数方法名=API 名；依赖缺失或内部异常一律回 {"success":False,"error":...} 而非抛出。
+# webui.json 另断言 schema_version/workspace_title/页数上限/查询只绑已注册 API/组件白名单。
+
+
+class _ExplodingStore:
+    """v1.14.12 专用 store 替身：任何方法调用都抛 RuntimeError，用于验证 API 异常兜底。"""
+
+    def __getattr__(self, name: str):
+        async def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(f"store.{name} 注入故障")
+        return _boom
+
+
+class _WebuiLLM(DummyLLM):
+    """v1.14.12 概览 API 的模型替身：DummyLLM 之上补齐 available_tasks/health_error 两个运行态。"""
+
+    def __init__(self,*,tasks:tuple[str,...]=(),health_error:str="")->None:
+        self.available_tasks=set(tasks); self.health_error=health_error
+
+    def task_available(self,kind:str)->bool:return kind in self.available_tasks
+
+
+WEBUI_API_NAMES=("webui_status_overview","webui_status_history","webui_information_digest",
+                 "webui_bookshelf_overview","webui_schedule","webui_users","webui_memories",
+                 "webui_dates","webui_usage","webui_config_summary","webui_admin_summary")
+
+
+class V11412WebuiOverviewTests(unittest.IsolatedAsyncioTestCase):
+    """webui_status_overview：响应键齐全、round 一位小数、心情档位、睡眠相位与休息类型中译、绘图联动。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.config.environment.city = ""  # 天气走离线缓存分支，测试全程不联网
+        self.now = datetime(2026, 10, 7, 15, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self, *, drawpic_enabled: bool = False,
+                      drawpic_loaded: bool | None = None,
+                      llm: Any | None = None) -> MaiLifePlugin:
+        self.config.linkage.drawpic_enabled = drawpic_enabled
+        plugin = await build_plugin(self.store, self.config, llm=llm or _WebuiLLM(), now=self.now)
+        plugin._bot_name = "小米"
+        plugin._drawpic_loaded = drawpic_loaded
+        return plugin
+
+    async def _seed_state(self, **overrides: Any) -> None:
+        state = await self.store.get_state()
+        state.update({"energy": 66.5, "hunger": 12.0, "mood_valence": 0.4, "mood_arousal": 0.5,
+                      "sleep_phase": "awake", "current_activity": "拼拼图",
+                      "current_location": "客厅", "health_status": "normal",
+                      "health_note": "状态正常", "last_updated_at": self.now.timestamp()})
+        state.update(overrides)
+        await self.store.save_state(state)
+
+    async def test_overview_response_keys_are_complete(self):
+        plugin = await self._plugin()
+        await self._seed_state()
+        today = self.now.date().isoformat()
+        await self.store.replace_framework(today, [{
+            "id": "f1", "day": today, "start_minute": 0, "end_minute": 1440, "kind": "leisure",
+            "summary": "安安静静拼拼图", "location": "客厅", "energy_load": -1, "shareability": 0.4}])
+        data = await plugin.webui_status_overview()
+        for key in ("generated_at", "bot_name", "version", "state", "schedule", "weather",
+                    "day_type", "upcoming_festival", "sleep", "linkage", "services", "recall"):
+            self.assertIn(key, data, f"响应缺少键 {key}")
+        self.assertEqual(data["bot_name"], "小米")
+        self.assertEqual(data["version"], PLUGIN_VERSION)
+        self.assertTrue(str(data["generated_at"] or ""))
+        self.assertIsInstance(data["weather"], str)
+        self.assertTrue(str(data["day_type"] or ""))
+        self.assertIsInstance(data["upcoming_festival"], str)
+        # state 子对象：契约九键齐全，数值直接来自 global_state。
+        state = data["state"]
+        for key in ("energy", "hunger", "mood_valence", "mood_arousal", "mood_label",
+                    "sleep_phase_zh", "current_activity", "current_location", "health_note"):
+            self.assertIn(key, state, f"state 缺少键 {key}")
+        self.assertAlmostEqual(float(state["energy"]), 66.5)
+        self.assertAlmostEqual(float(state["hunger"]), 12.0)
+        self.assertAlmostEqual(float(state["mood_arousal"]), 0.5)
+        self.assertEqual(state["current_activity"], "拼拼图")
+        self.assertEqual(state["current_location"], "客厅")
+        self.assertEqual(state["health_note"], "状态正常")
+        self.assertEqual(state["sleep_phase_zh"], "清醒")
+        # schedule 子对象：当前/下一节点视图 + next_summary + 细化场景，四键齐全。
+        schedule = data["schedule"]
+        self.assertEqual(set(schedule), {"current", "next", "next_summary", "scene"})
+        current = schedule["current"]
+        self.assertIsNotNone(current)
+        self.assertEqual(set(current), {"kind", "kind_zh", "summary", "location",
+                                        "start", "end", "window"})
+        self.assertEqual(current["summary"], "安安静静拼拼图")
+        self.assertEqual(current["location"], "客厅")
+        self.assertEqual(current["kind_zh"], "闲暇")
+        self.assertEqual(current["start"], "00:00")
+        self.assertEqual(current["end"], "24:00")
+        self.assertEqual(current["window"], "00:00-24:00")
+        self.assertEqual(set(schedule["next"]), {"kind_zh", "summary", "start"})
+        self.assertEqual(schedule["next"]["summary"], "")
+        self.assertEqual(schedule["scene"], {"scene": "", "applied": False})
+        # sleep / services / recall 三个新增子对象的键与契约逐字一致。
+        self.assertEqual(set(data["sleep"]), {"phase_zh", "kind_zh", "grace_until", "woken_count",
+                                              "last_event", "defer_until", "started_at"})
+        self.assertEqual(set(data["services"]), {"llm_health", "available_tasks", "background_tasks",
+                                                 "active_bursts", "active_groups", "users_summary",
+                                                 "diary_last_day", "narrative_note", "news_count",
+                                                 "exploration_count", "search_history_count",
+                                                 "last_failure", "group_observations",
+                                                 "archived_today", "pending_inspirations"})
+        self.assertEqual(set(data["recall"]), {"enabled", "cache_enabled", "latest"})
+
+    async def test_overview_state_rounds_to_one_decimal(self):
+        plugin = await self._plugin()
+        await self._seed_state(energy=66.55, hunger=12.44, mood_valence=0.44, mood_arousal=-0.26)
+        state = (await plugin.webui_status_overview())["state"]
+        for key, seeded in (("energy", 66.55), ("hunger", 12.44),
+                            ("mood_valence", 0.44), ("mood_arousal", -0.26)):
+            with self.subTest(key=key):
+                value = float(state[key])
+                self.assertEqual(value, round(seeded, 1))
+                self.assertAlmostEqual(value * 10, round(value * 10), places=6)  # 最多一位小数
+
+    async def test_overview_mood_label_matches_valence_bands(self):
+        plugin = await self._plugin()
+        for valence, label in ((-0.8, "低落"), (-0.3, "有些闷"), (0.0, "平静"),
+                               (0.4, "不错"), (0.9, "很好")):
+            with self.subTest(valence=valence):
+                await self._seed_state(mood_valence=valence)
+                data = await plugin.webui_status_overview()
+                self.assertEqual(data["state"]["mood_label"], label)
+
+    async def test_overview_translates_deep_sleep_phase(self):
+        plugin = await self._plugin()
+        await self._seed_state(sleep_phase="deep_sleep")
+        data = await plugin.webui_status_overview()
+        self.assertEqual(data["state"]["sleep_phase_zh"], "深睡")
+
+    async def test_overview_without_framework_has_null_current(self):
+        plugin = await self._plugin()
+        await self._seed_state()
+        data = await plugin.webui_status_overview()
+        # 可空嵌套对象一律返回键齐全的空字典：WebUI 渲染器途经 null 会抛错整页。
+        self.assertEqual(set(data["schedule"]["current"]),
+                         {"kind", "kind_zh", "summary", "location", "start", "end", "window"})
+        self.assertEqual(data["schedule"]["current"]["kind_zh"], "未知")
+        self.assertEqual(set(data["schedule"]["next"]), {"kind_zh", "summary", "start"})
+        self.assertEqual(data["schedule"]["scene"], {"scene": "", "applied": False})
+        self.assertIn("next_summary", data["schedule"])
+
+    async def test_overview_linkage_reflects_config_and_detection(self):
+        plugin = await self._plugin(drawpic_enabled=False, drawpic_loaded=None)
+        data = await plugin.webui_status_overview()
+        self.assertEqual(data["linkage"], {"drawpic_enabled": False, "drawpic_detected": False})
+        plugin = await self._plugin(drawpic_enabled=True, drawpic_loaded=True)
+        data = await plugin.webui_status_overview()
+        self.assertEqual(data["linkage"], {"drawpic_enabled": True, "drawpic_detected": True})
+        # 开关开着但未检测到绘图插件：detected 不得编造为 True。
+        plugin = await self._plugin(drawpic_enabled=True, drawpic_loaded=False)
+        data = await plugin.webui_status_overview()
+        self.assertEqual(data["linkage"], {"drawpic_enabled": True, "drawpic_detected": False})
+
+    async def test_overview_schedule_next_node_view(self):
+        plugin = await self._plugin()
+        await self._seed_state()
+        today = self.now.date().isoformat()
+        # 15:00 落在 09:00 前、18:00 后的空档 → 无当前节点，下一节点是 18:00 用餐。
+        await self.store.replace_framework(today, [
+            {"id": "f1", "day": today, "start_minute": 0, "end_minute": 540, "kind": "sleep",
+             "summary": "睡觉", "location": "卧室", "energy_load": -1, "shareability": 0.0},
+            {"id": "f2", "day": today, "start_minute": 1080, "end_minute": 1200, "kind": "meal",
+             "summary": "吃晚饭", "location": "餐厅", "energy_load": 0.1, "shareability": 0.5}])
+        schedule = (await plugin.webui_status_overview())["schedule"]
+        self.assertEqual(schedule["current"]["kind_zh"], "未知")  # 空档无当前节点
+        self.assertEqual(set(schedule["next"]), {"kind_zh", "summary", "start"})
+        self.assertEqual(schedule["next"]["kind_zh"], "用餐")
+        self.assertEqual(schedule["next"]["summary"], "吃晚饭")
+        self.assertEqual(schedule["next"]["start"], "18:00")
+        self.assertEqual(schedule["next_summary"], "吃晚饭")
+
+    async def test_overview_sleep_runtime_and_kind_translation(self):
+        plugin = await self._plugin()
+        await self._seed_state(sleep_phase="light_sleep")
+        today = self.now.date().isoformat()
+        await self.store.replace_framework(today, [{
+            "id": "f1", "day": today, "start_minute": 0, "end_minute": 1440, "kind": "leisure",
+            "summary": "午后小憩", "location": "卧室", "energy_load": -1, "shareability": 0.2}])
+        await self.store.save_sleep_runtime({
+            "phase": "light_sleep", "started_at": self.now.timestamp() - 1800,
+            "awake_grace_until": 0, "woken_count": 2,
+            "last_event": "凌晨被叫醒", "sleep_defer_until": self.now.timestamp() + 600})
+        sleep = (await plugin.webui_status_overview())["sleep"]
+        self.assertEqual(sleep["phase_zh"], "浅睡")
+        # kind=leisure 不在 gate_segment_types，15:00 也不在夜窗/午休窗 → 普通休息。
+        self.assertEqual(sleep["kind_zh"], "休息")
+        self.assertEqual(sleep["woken_count"], 2)
+        self.assertEqual(sleep["last_event"], "凌晨被叫醒")
+        # 时间戳格式化为 MM-DD HH:MM 供网页展示；0 视为无效，返回 None（页面显示"—"）。
+        self.assertEqual(sleep["started_at"],
+                         datetime.fromtimestamp(self.now.timestamp() - 1800, tz=TZ).strftime("%m-%d %H:%M"))
+        self.assertEqual(sleep["defer_until"],
+                         datetime.fromtimestamp(self.now.timestamp() + 600, tz=TZ).strftime("%m-%d %H:%M"))
+        self.assertIsNone(sleep["grace_until"])
+
+    async def test_overview_services_reflect_seeded_runtime(self):
+        plugin = await self._plugin()
+        await self._seed_state()
+        now_ts = self.now.timestamp()
+        await self.store.save_diary("2026-10-06", "昨天的日记", "正文", "平静", "digest", now_ts - 86400)
+        await self.store.save_group_observation({
+            "id": "obs-1", "group_id": "100", "group_alias": "测试群", "topic": "话题",
+            "summary": "摘要", "interest_score": 0.8, "source_adapter": "qq",
+            "created_at": now_ts, "expires_at": now_ts + 3600, "source_message_ids": ["m1"]})
+        await self.store.upsert_news_item({
+            "id": "news-1", "source_id": "rss-tech", "title": "新闻标题", "url": "https://example.com/1",
+            "summary": "新闻摘要", "content": "正文", "published_at": now_ts, "fetched_at": now_ts,
+            "content_hash": "hash-1", "expires_at": now_ts + 6 * 3600})
+        await self.store.save_exploration_note({
+            "id": "note-1", "topic": "话题", "query": "查询", "summary": "资料摘要",
+            "source_urls": ["https://example.com/src"], "created_at": now_ts,
+            "relevance_score": 0.6, "relevance_reason": "", "opportunity_id": "",
+            "expires_at": now_ts + 6 * 3600})
+        await self.store.record_search_history(
+            created_at=now_ts, operation="tool_search", query="查询词", provider_type="bocha",
+            success=True, result_count=3, error_class="", duration_ms=120.0, results=[],
+            expires_at=now_ts + 6 * 3600)
+        await self.store.add_creation_inspiration({
+            "id": "insp-1", "source_kind": "life", "source_ref": "ref", "prompt_digest": "digest",
+            "score": 0.5, "created_at": now_ts, "expires_at": now_ts + 3600})
+        services = (await plugin.webui_status_overview())["services"]
+        self.assertEqual(services["diary_last_day"], "2026-10-06")
+        self.assertEqual(services["group_observations"], 1)
+        self.assertEqual(services["news_count"], 1)
+        self.assertEqual(services["exploration_count"], 1)
+        self.assertEqual(services["search_history_count"], 1)
+        self.assertEqual(services["pending_inspirations"], 1)
+        self.assertEqual(services["archived_today"], 0)
+        self.assertEqual(services["last_failure"], "无")
+        self.assertEqual(services["llm_health"], "正常")
+        self.assertEqual(services["available_tasks"], "无")
+        self.assertEqual(services["background_tasks"], 0)
+        self.assertEqual(services["active_bursts"], 0)
+        self.assertEqual(services["active_groups"], 0)
+        self.assertIn("已配置 0 个", services["users_summary"])
+        self.assertTrue(services["narrative_note"])
+        # 模型健康异常时原样透出，不吞掉。
+        plugin = await self._plugin(llm=_WebuiLLM(health_error="Host 未返回可用任务"))
+        await self._seed_state()
+        self.assertEqual((await plugin.webui_status_overview())["services"]["llm_health"],
+                         "Host 未返回可用任务")
+
+    async def test_overview_recall_latest_private_summary(self):
+        plugin = await self._plugin()
+        await self._seed_state()
+        now_ts = self.now.timestamp()
+        # 私聊撤回摘要：group_id='' 且 summary_expires_at 在有效期内才进 latest。
+        self.store.conn.execute(
+            """INSERT OR REPLACE INTO recall_events
+            (session_id,recalled_message_id,user_id,operator_id,group_id,notice_type,
+             source_adapter,summary,summary_expires_at,media_types,created_at,expires_at)
+            VALUES(?,?,?,?,'','friend','qq',?,?,'["image"]',?,?)""",
+            ("stream-1", "m1", "30001", "30001", "刚发了一张照片又撤回了", now_ts + 600,
+             now_ts, now_ts + 86400))
+        self.store.conn.commit()
+        data = await plugin.webui_status_overview()
+        recall = data["recall"]
+        self.assertEqual(recall["enabled"], "开启")  # 开关中文化，网页不显示裸 true/false
+        self.assertEqual(recall["cache_enabled"], "关闭")
+        latest = recall["latest"]
+        self.assertIsNotNone(latest)
+        self.assertEqual(set(latest), {"user_id", "summary", "media_types", "age"})
+        self.assertEqual(latest["user_id"], "30001")
+        self.assertEqual(latest["summary"], "刚发了一张照片又撤回了")
+        self.assertEqual(latest["media_types"], ["image"])
+        self.assertEqual(latest["age"], "刚刚")
+
+    async def test_overview_recall_latest_is_null_without_summary(self):
+        plugin = await self._plugin()
+        await self._seed_state()
+        latest = (await plugin.webui_status_overview())["recall"]["latest"]
+        self.assertEqual(latest, {"user_id": "", "summary": "", "media_types": [], "age": ""})
+
+    async def test_overview_narrative_note_reflects_model_availability(self):
+        plugin = await self._plugin(llm=_WebuiLLM(tasks=("dream", "diary", "creation_body")))
+        await self._seed_state()
+        self.assertEqual((await plugin.webui_status_overview())["services"]["narrative_note"], "")
+
+
+class V11412WebuiHistoryTests(unittest.IsolatedAsyncioTestCase):
+    """webui_status_history：state_snapshots 最近 72 小时、按时间升序；无数据为空数组。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self) -> MaiLifePlugin:
+        return await build_plugin(self.store, MaiLifeSettings(), llm=DummyLLM())
+
+    async def _seed_snapshot(self, ts: float, energy: float, phase: str = "awake") -> None:
+        await self.store.save_state_snapshot(ts, {"energy": energy, "hunger": 30.0,
+            "mood_valence": 0.1, "mood_arousal": 0.5, "sleep_phase": phase,
+            "current_activity": "写代码"})
+
+    async def test_points_cover_last_72h_ascending_with_contract_fields(self):
+        plugin = await self._plugin()
+        now = time.time()
+        await self._seed_snapshot(now - 80 * 3600, 40.0)   # 窗口外
+        await self._seed_snapshot(now - 73 * 3600, 41.0)   # 窗口外
+        await self._seed_snapshot(now - 48 * 3600, 50.0)
+        await self._seed_snapshot(now - 24 * 3600, 51.5)
+        await self._seed_snapshot(now - 1800, 52.5, phase="light_sleep")
+        data = await plugin.webui_status_history()
+        self.assertIn("points", data)
+        points = data["points"]
+        self.assertEqual(len(points), 3, f"应只返回 72h 内的三条快照: {points}")
+        # 能量值递增既验证升序，也验证窗口外的两条被排除。
+        self.assertEqual([float(p["energy"]) for p in points], [50.0, 51.5, 52.5])
+        timestamps = [float(p["ts"]) for p in points]
+        self.assertEqual(timestamps, sorted(timestamps))
+        for point in points:
+            self.assertEqual(set(point), {"ts", "energy", "hunger", "mood_valence",
+                                          "mood_arousal", "sleep_phase"},
+                             f"point 字段超出契约: {sorted(point)}")
+        self.assertEqual(points[-1]["sleep_phase"], "light_sleep")
+        self.assertAlmostEqual(float(points[-1]["hunger"]), 30.0)
+
+    async def test_points_empty_without_snapshots(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_status_history()
+        self.assertIn("points", data)
+        self.assertEqual(data["points"], [])
+
+
+class V11412WebuiDigestTests(unittest.IsolatedAsyncioTestCase):
+    """webui_information_digest：主人后台全量展示——新闻/探索至多 10 条（含 URL 与全文）、
+    搜索历史至多 20 条（含结果摘要）；开关计数与字段逐字对齐。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.now = time.time()
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self, *, information_enabled: bool = True) -> MaiLifePlugin:
+        # 联网三开关默认全关；摘要的 status 块要反映配置，这里显式打开。
+        config = MaiLifeSettings()
+        config.information.enabled = information_enabled
+        config.news.enabled = information_enabled
+        config.search.enabled = information_enabled
+        return await build_plugin(self.store, config, llm=DummyLLM())
+
+    async def _seed_news(self, count: int) -> None:
+        for index in range(count):
+            await self.store.upsert_news_item({
+                "id": f"news-{index}", "source_id": "rss-tech", "title": f"新闻标题{index}",
+                "url": f"https://example.com/news/{index}", "summary": f"新闻摘要{index}",
+                "content": "正文", "published_at": self.now - index * 60,
+                "fetched_at": self.now, "content_hash": f"hash-{index}",
+                "expires_at": self.now + 6 * 3600})
+        # 最新一条打自我关联分，验证 score 字段透出（未打分的条目为 0）。
+        await self.store.mark_news_associated("news-0", 0.6, "与生活相关", "opp-1", self.now)
+
+    async def _seed_explorations(self, count: int) -> None:
+        for index in range(count):
+            await self.store.save_exploration_note({
+                "id": f"note-{index}", "topic": f"话题{index}", "query": f"查询{index}",
+                "summary": f"资料摘要{index}", "source_urls": [f"https://example.com/src/{index}"],
+                "created_at": self.now - index * 60, "relevance_score": 0.6,
+                "relevance_reason": "", "opportunity_id": "", "expires_at": self.now + 6 * 3600})
+
+    async def _seed_search_history(self, count: int) -> None:
+        for index in range(count):
+            await self.store.record_search_history(
+                created_at=self.now - index * 60, operation="tool_search",
+                query=f"查询词{index}", provider_type="bocha" if index % 2 else "playwright",
+                success=index % 2 == 0, result_count=3, error_class="", duration_ms=120.0,
+                results=[], expires_at=self.now + 6 * 3600)
+
+    async def test_digest_status_lists_caps_and_fields(self):
+        plugin = await self._plugin()
+        await self._seed_news(7)
+        await self._seed_explorations(6)
+        await self._seed_search_history(11)
+        data = await plugin.webui_information_digest()
+        self.assertEqual(set(data), {"status", "news", "news_full_text",
+                                     "explorations", "explorations_full_text", "search_history"})
+        self.assertEqual(len(data["news"]), 7)
+        self.assertEqual(len(data["explorations"]), 6)
+        self.assertEqual(len(data["search_history"]), 11)
+        for item in data["news"]:
+            self.assertEqual(set(item), {"title", "summary", "url", "content", "age", "score"},
+                             f"news 字段超出契约: {sorted(item)}")
+        for item in data["explorations"]:
+            self.assertEqual(set(item), {"topic", "query", "summary", "sources_text", "age", "score"},
+                             f"explorations 字段超出契约: {sorted(item)}")
+        for item in data["search_history"]:
+            self.assertEqual(set(item), {"time", "operation", "query", "provider_type",
+                                         "success", "result_count", "error_class",
+                                         "results_digest", "duration_ms"},
+                             f"search_history 字段超出契约: {sorted(item)}")
+        self.assertAlmostEqual(data["news"][0]["score"], 0.6)
+        self.assertAlmostEqual(data["explorations"][0]["score"], 0.6)
+        self.assertAlmostEqual(data["news"][4]["score"], 0.0)  # 未打关联分的条目为 0
+        self.assertTrue(str(data["news"][0]["age"] or ""))
+        self.assertIsInstance(data["news"][0]["age"], str)
+        self.assertRegex(str(data["search_history"][0]["time"]), r"^\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertEqual(data["search_history"][0]["operation"], "tool_search")
+        self.assertTrue(data["search_history"][0]["success"])
+        self.assertEqual(data["search_history"][0]["result_count"], 3)
+        self.assertAlmostEqual(data["search_history"][0]["duration_ms"], 120.0)
+        status = data["status"]
+        self.assertEqual(set(status), {"information_enabled", "news_enabled", "search_enabled",
+                                       "sources", "recent_news", "recent_explorations",
+                                       "recent_search_history"})
+        self.assertEqual(status["information_enabled"], "开启")  # 开关中文化，网页不显示裸 false
+        self.assertEqual(status["news_enabled"], "开启")
+        self.assertEqual(status["search_enabled"], "开启")
+        self.assertIsInstance(status["sources"], int)
+        self.assertEqual(status["recent_news"], 7)
+        self.assertEqual(status["recent_explorations"], 6)
+        self.assertEqual(status["recent_search_history"], 11)
+        serialized = json.dumps(data, ensure_ascii=False)
+        # 主人后台全量展示：新闻 URL、探索来源与搜索结果摘要直接透出。
+        self.assertIn("http", serialized)
+        # 不含用户身份字段。
+        for forbidden in ("user_id", "session_id", "stream_id"):
+            self.assertNotIn(forbidden, serialized)
+        # 开关默认全关时 status 如实反映，不编造开启。
+        disabled = await (await self._plugin(information_enabled=False)).webui_information_digest()
+        self.assertEqual(disabled["status"]["information_enabled"], "关闭")
+        self.assertEqual(disabled["status"]["news_enabled"], "关闭")
+        self.assertEqual(disabled["status"]["search_enabled"], "关闭")
+
+    async def test_digest_without_data_returns_empty_lists(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_information_digest()
+        self.assertEqual(data.get("news"), [])
+        self.assertEqual(data.get("explorations"), [])
+        self.assertEqual(data.get("search_history"), [])
+        status = data["status"]
+        self.assertEqual(status["recent_news"], 0)
+        self.assertEqual(status["recent_explorations"], 0)
+        self.assertEqual(status["recent_search_history"], 0)
+
+
+class V11412WebuiBookshelfTests(unittest.IsolatedAsyncioTestCase):
+    """webui_bookshelf_overview：文档（含私人）/创作运行/最新作品摘录与创作状态；books 至多 20 条。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.now = datetime(2026, 10, 7, 15, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self, *, creation_enabled: bool = False, daily_max: int = 1) -> MaiLifePlugin:
+        config = MaiLifeSettings()
+        config.creation.enabled = creation_enabled
+        config.creation.daily_max = daily_max
+        if creation_enabled:
+            config.creation.plaintext_storage_acknowledged = True
+        return await build_plugin(self.store, config, llm=DummyLLM(), now=self.now)
+
+    async def _seed_work(self, index: int, *, privacy: str = "public",
+                         title_prefix: str = "随笔") -> None:
+        moment = self.now.timestamp() - index * 60
+        await self.store.create_bookshelf_document({
+            "id": f"doc-{index}", "doc_type": "work", "work_type": "essay",
+            "title": f"{title_prefix}标题{index}", "privacy": privacy, "status": "archived",
+            "source_kind": "life", "source_ref": f"ref-{index}",
+            "summary": f"{title_prefix}摘要{index}", "created_at": moment})
+        await self.store.add_bookshelf_revision(f"doc-{index}", "body", f"正文内容{index}",
+                                                "fallback", moment, status="archived")
+
+    async def test_bookshelf_counts_books_runs_and_latest_work(self):
+        plugin = await self._plugin()
+        for index in range(12):
+            await self._seed_work(index)
+        await self._seed_work(12, privacy="private", title_prefix="私人草稿")
+        await self.store.save_diary("2026-10-06", "昨天的日记", "日记正文", "平静", "digest",
+                                    self.now.timestamp() - 86400)
+        await self.store.start_creation_run("run-1", "insp-1", "doc-0", self.now.timestamp())
+        await self.store.finish_creation_run("run-1", "archived", self.now.timestamp())
+        data = await plugin.webui_bookshelf_overview()
+        self.assertEqual(set(data), {"counts", "creation", "books", "books_full_text",
+                                     "runs", "latest_work"})
+        self.assertEqual(set(data["counts"]), {"documents", "private_documents", "creation_runs"})
+        # 12 篇公开 + 1 篇私人 + 1 篇日记 = 14 个文档；日记同属书柜文档。
+        self.assertEqual(data["counts"]["documents"], 14)
+        self.assertEqual(data["counts"]["private_documents"], 2)  # 私人草稿 + 私人日记
+        self.assertEqual(data["counts"]["creation_runs"], 1)
+        self.assertEqual(len(data["books"]), 14)
+        for book in data["books"]:
+            self.assertEqual(set(book), {"doc_type", "title", "privacy", "status",
+                                         "updated_age", "summary", "content"},
+                             f"book 字段超出契约: {sorted(book)}")
+        # 主人专属网页：私人文档与日记都可见（隐私反转后不再过滤）。
+        privacy_by_title = {book["title"]: book["privacy"] for book in data["books"]}
+        self.assertIn("私人草稿标题12", privacy_by_title)
+        self.assertEqual(privacy_by_title["私人草稿标题12"], "private")
+        self.assertIn("昨天的日记", privacy_by_title)
+        self.assertEqual(privacy_by_title["昨天的日记"], "private")
+        self.assertIn("diary", {book["doc_type"] for book in data["books"]})
+        self.assertTrue(str(data["books"][0]["updated_age"] or ""))
+        run = data["runs"][0]
+        self.assertEqual(set(run), {"document_id", "title", "status", "started_at"})
+        self.assertEqual(run["document_id"], "doc-0")
+        self.assertEqual(run["title"], "随笔标题0")
+        self.assertEqual(run["status"], "archived")
+        latest = data["latest_work"]
+        self.assertIsNotNone(latest)
+        self.assertEqual(set(latest), {"title", "privacy", "content"})
+        self.assertEqual(latest["title"], "随笔标题0")
+        self.assertEqual(latest["privacy"], "public")
+        self.assertIn("正文内容0", latest["content"])
+
+    async def test_bookshelf_books_capped_at_20(self):
+        plugin = await self._plugin()
+        for index in range(25):
+            await self._seed_work(index)
+        data = await plugin.webui_bookshelf_overview()
+        self.assertEqual(len(data["books"]), 20)
+        self.assertEqual(data["counts"]["documents"], 25)  # 计数不受列表限量影响
+
+    async def test_creation_status_reflects_config_and_store(self):
+        plugin = await self._plugin()
+        creation = (await plugin.webui_bookshelf_overview())["creation"]
+        self.assertEqual(set(creation), {"enabled", "plaintext_acknowledged", "archived_today",
+                                         "pending_inspirations", "daily_max"})
+        self.assertFalse(creation["enabled"])
+        self.assertFalse(creation["plaintext_acknowledged"])
+        self.assertEqual(creation["daily_max"], 1)
+        self.assertEqual(creation["archived_today"], 0)
+        self.assertEqual(creation["pending_inspirations"], 0)
+        # 待处理灵感与今日归档来自存储，不只看配置开关。
+        await self.store.add_creation_inspiration({
+            "id": "insp-1", "source_kind": "life", "source_ref": "ref", "prompt_digest": "digest",
+            "score": 0.5, "created_at": self.now.timestamp(), "expires_at": self.now.timestamp() + 3600})
+        await self._seed_work(0)
+        plugin = await self._plugin(creation_enabled=True, daily_max=3)
+        creation = (await plugin.webui_bookshelf_overview())["creation"]
+        self.assertTrue(creation["enabled"])
+        self.assertTrue(creation["plaintext_acknowledged"])
+        self.assertEqual(creation["daily_max"], 3)
+        self.assertEqual(creation["pending_inspirations"], 1)
+        self.assertEqual(creation["archived_today"], 1)
+
+    async def test_latest_work_is_null_without_documents(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_bookshelf_overview()
+        self.assertEqual(data["latest_work"], {"title": "", "privacy": "", "content": ""})
+        self.assertEqual(data["books"], [])
+        self.assertEqual(data["runs"], [])
+
+
+class V11412WebuiScheduleTests(unittest.IsolatedAsyncioTestCase):
+    """webui_schedule：今日节点表（HH:MM/中译/场景/精力负载）、当前/下一节点、场景与明日预览。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.now = datetime(2026, 10, 7, 10, 30, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self) -> MaiLifePlugin:
+        return await build_plugin(self.store, MaiLifeSettings(), llm=DummyLLM(), now=self.now)
+
+    async def _seed_today(self) -> str:
+        today = self.now.date().isoformat()
+        await self.store.replace_framework(today, [
+            {"id": "n1", "day": today, "start_minute": 0, "end_minute": 480, "kind": "sleep",
+             "summary": "睡觉", "location": "卧室", "energy_load": -1, "shareability": 0.0},
+            {"id": "n2", "day": today, "start_minute": 540, "end_minute": 720, "kind": "work",
+             "summary": "写插件", "location": "书房", "energy_load": 0.85, "shareability": 0.35},
+            {"id": "n3", "day": today, "start_minute": 720, "end_minute": 780, "kind": "meal",
+             "summary": "吃午饭", "location": "餐厅", "energy_load": 0.2, "shareability": 0.6}])
+        await self.store.save_scene("n2", "在书房改 WebUI 契约", {"energy": -0.2}, [])
+        return today
+
+    async def test_schedule_nodes_current_next_scene_and_tomorrow(self):
+        plugin = await self._plugin()
+        today = await self._seed_today()
+        tomorrow = (self.now + timedelta(days=1)).date().isoformat()
+        await self.store.replace_framework(tomorrow, [
+            {"id": "t1", "day": tomorrow, "start_minute": 600, "end_minute": 660, "kind": "study",
+             "summary": "看书", "location": "客厅", "energy_load": 0.1, "shareability": 0.3}])
+        data = await plugin.webui_schedule()
+        self.assertEqual(set(data), {"day", "generated_at", "current", "next", "scene",
+                                     "nodes", "tomorrow"})
+        self.assertEqual(data["day"], today)
+        self.assertTrue(str(data["generated_at"] or ""))
+        # 节点表：字段逐字对齐，起止为 HH:MM，类型中译，场景按 framework_id 关联。
+        self.assertEqual(len(data["nodes"]), 3)
+        for node in data["nodes"]:
+            self.assertEqual(set(node), {"start", "end", "kind_zh", "summary", "location",
+                                         "scene", "energy_load", "shareability"},
+                             f"node 字段超出契约: {sorted(node)}")
+        self.assertEqual([n["start"] for n in data["nodes"]], ["00:00", "09:00", "12:00"])
+        self.assertEqual([n["end"] for n in data["nodes"]], ["08:00", "12:00", "13:00"])
+        self.assertEqual([n["kind_zh"] for n in data["nodes"]], ["睡眠", "工作", "用餐"])
+        self.assertEqual(data["nodes"][1]["scene"], "在书房改 WebUI 契约")
+        self.assertEqual(data["nodes"][0]["scene"], "")
+        self.assertEqual(data["nodes"][1]["energy_load"], round(0.85, 1))  # 精力负载一位小数
+        self.assertAlmostEqual(data["nodes"][1]["shareability"], 0.35)
+        current = data["current"]
+        self.assertEqual(set(current), {"kind", "kind_zh", "summary", "location",
+                                        "start", "end", "window"})
+        self.assertEqual(current["kind"], "work")
+        self.assertEqual(current["kind_zh"], "工作")
+        self.assertEqual(current["summary"], "写插件")
+        self.assertEqual(current["window"], "09:00-12:00")
+        nxt = data["next"]
+        self.assertEqual(set(nxt), {"kind_zh", "summary", "start"})
+        self.assertEqual(nxt["kind_zh"], "用餐")
+        self.assertEqual(nxt["summary"], "吃午饭")
+        self.assertEqual(nxt["start"], "12:00")
+        scene = data["scene"]
+        self.assertEqual(set(scene), {"scene", "applied"})
+        self.assertEqual(scene["scene"], "在书房改 WebUI 契约")
+        self.assertFalse(scene["applied"])
+        tomorrow_view = data["tomorrow"]
+        self.assertEqual(set(tomorrow_view), {"day", "nodes"})
+        self.assertEqual(tomorrow_view["day"], tomorrow)
+        self.assertEqual(len(tomorrow_view["nodes"]), 1)
+        self.assertEqual(set(tomorrow_view["nodes"][0]),
+                         {"start", "end", "kind_zh", "summary", "location"})
+        self.assertEqual(tomorrow_view["nodes"][0]["kind_zh"], "学习")
+        self.assertEqual(tomorrow_view["nodes"][0]["start"], "10:00")
+
+    async def test_schedule_without_framework_returns_empty_views(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_schedule()
+        self.assertEqual(data["nodes"], [])
+        self.assertEqual(set(data["current"]),
+                         {"kind", "kind_zh", "summary", "location", "start", "end", "window"})
+        self.assertEqual(data["current"]["kind_zh"], "未知")
+        self.assertEqual(set(data["next"]), {"kind_zh", "summary", "start"})
+        self.assertEqual(data["scene"], {"scene": "", "applied": False})
+        self.assertEqual(data["tomorrow"]["nodes"], [])
+
+    async def test_schedule_scenes_bind_by_framework_id_not_position(self):
+        """同一 start_minute 的多个节点按 framework_id 各挂各的场景，不互相覆盖。"""
+        plugin = await self._plugin()
+        today = self.now.date().isoformat()
+        await self.store.replace_framework(today, [
+            {"id": "a", "day": today, "start_minute": 540, "end_minute": 600, "kind": "work",
+             "summary": "写代码", "location": "书房", "energy_load": 0.5, "shareability": 0.4},
+            {"id": "b", "day": today, "start_minute": 540, "end_minute": 600, "kind": "study",
+             "summary": "读文档", "location": "客厅", "energy_load": 0.3, "shareability": 0.2}])
+        await self.store.save_scene("a", "场景甲", {}, [])
+        await self.store.save_scene("b", "场景乙", {}, [])
+        scenes = {node["summary"]: node["scene"]
+                  for node in (await plugin.webui_schedule())["nodes"]}
+        self.assertEqual(scenes, {"写代码": "场景甲", "读文档": "场景乙"})
+
+
+class V11412WebuiUsersTests(unittest.IsolatedAsyncioTestCase):
+    """webui_users：全量用户（含禁用）关系字段、阶段分档、最近互动截断与 50 人上限。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.now = datetime(2026, 10, 7, 15, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self) -> MaiLifePlugin:
+        return await build_plugin(self.store, self.config, llm=DummyLLM(), now=self.now)
+
+    async def _seed_users(self) -> None:
+        # initial_temperature 是 int 配置字段；小数温度直接写库（列是 REAL）验证 round。
+        await self.store.sync_users([
+            UserProfile(user_id="1", initial_temperature=85, role="owner"),
+            UserProfile(user_id="2", initial_temperature=45, proactive_enabled=False),
+            UserProfile(user_id="3", initial_temperature=10, enabled=False)])
+        await self.store.update_user_display_name("1", "主人甲")
+        await self.store.record_interaction("1", "最近一条互动" + "很" * 200,
+                                            self.now.timestamp(), 15)
+        # 直接补运行态列：互动时间/主动时间/主动计数/关系结算日/小数温度。
+        self.store.conn.execute(
+            "UPDATE users SET last_user_message_at=?,last_proactive_at=?,proactive_count=?,"
+            "last_relation_day=?,temperature=? WHERE user_id=?",
+            (self.now.timestamp() - 3600, self.now.timestamp() - 2 * 86400, 2, "2026-10-06",
+             85.44, "1"))
+        self.store.conn.commit()
+
+    async def test_users_counts_fields_stage_and_recent_truncation(self):
+        plugin = await self._plugin()
+        await self._seed_users()
+        data = await plugin.webui_users()
+        self.assertEqual(set(data), {"counts", "users"})
+        self.assertEqual(set(data["counts"]), {"total", "enabled", "disabled", "owners",
+                                               "proactive_enabled"})
+        self.assertEqual(data["counts"], {"total": 3, "enabled": 2, "disabled": 1,
+                                          "owners": 1, "proactive_enabled": 1})
+        self.assertEqual(len(data["users"]), 3)
+        by_id = {item["user_id"]: item for item in data["users"]}
+        self.assertEqual(set(by_id["1"]), {"user_id", "display_name", "role", "enabled",
+                                           "temperature", "stage", "proactive_enabled",
+                                           "proactive_count", "daily_proactive_max",
+                                           "last_message_age", "last_proactive_age",
+                                           "last_relation_day", "recent"},
+                         f"user 字段超出契约: {sorted(by_id['1'])}")
+        owner = by_id["1"]
+        self.assertEqual(owner["display_name"], "主人甲")
+        self.assertEqual(owner["role"], "owner")
+        self.assertTrue(owner["enabled"])
+        self.assertTrue(owner["proactive_enabled"])
+        self.assertAlmostEqual(owner["temperature"], 85.4)  # round 一位小数
+        self.assertEqual(owner["stage"], "知己")
+        self.assertEqual(owner["proactive_count"], 2)
+        self.assertEqual(owner["daily_proactive_max"], 1)
+        self.assertEqual(owner["last_message_age"], "1 小时前")
+        self.assertEqual(owner["last_proactive_age"], "2 天前")
+        self.assertEqual(owner["last_relation_day"], "2026-10-06")
+        self.assertEqual(len(owner["recent"]), 60)  # 最近互动摘要截断 60 字
+        self.assertTrue(owner["recent"].startswith("最近一条互动"))
+        self.assertEqual(by_id["2"]["stage"], "熟悉")
+        self.assertFalse(by_id["2"]["proactive_enabled"])
+        self.assertEqual(by_id["3"]["stage"], "陌生")
+        self.assertFalse(by_id["3"]["enabled"])
+
+    async def test_users_capped_at_50_with_full_counts(self):
+        plugin = await self._plugin()
+        await self.store.sync_users([UserProfile(user_id=f"{2000 + index}", initial_temperature=50)
+                                     for index in range(55)])
+        data = await plugin.webui_users()
+        self.assertEqual(data["counts"]["total"], 55)
+        self.assertEqual(len(data["users"]), 50)
+
+    async def test_users_empty_returns_zero_counts(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_users()
+        self.assertEqual(data, {"counts": {"total": 0, "enabled": 0, "disabled": 0,
+                                           "owners": 0, "proactive_enabled": 0},
+                                "users": []})
+
+
+class V11412WebuiMemoriesTests(unittest.IsolatedAsyncioTestCase):
+    """webui_memories：日记至多 20 篇且每篇带全文、梦境取近 30 天前 20 条不截断、另拼 diaries_full_text。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.now = datetime(2026, 10, 7, 15, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self) -> MaiLifePlugin:
+        return await build_plugin(self.store, MaiLifeSettings(), llm=DummyLLM(), now=self.now)
+
+    async def test_memories_diaries_dreams_caps_and_latest(self):
+        plugin = await self._plugin()
+        now_ts = self.now.timestamp()
+        # 由旧到新写日记：memory_runtime.last_diary_day 自然落在最新一天。
+        for index in reversed(range(14)):  # 14 篇日记全量返回（上限 20 篇）
+            day = (self.now - timedelta(days=index)).date().isoformat()
+            await self.store.save_diary(day, f"日记{index}", "正文" * 800, f"心情{index}",
+                                        "digest", now_ts - index * 60)
+        for index in range(12):  # 近 30 天 12 条，列表全量返回（上限 20 条）
+            await self.store.add_dream(f"梦境{index}", 0.1, -0.2, now_ts - 3600,
+                                       fragments=[f"碎片{index}a", f"碎片{index}b"],
+                                       created_at=now_ts - (index + 1) * 3600)
+        await self.store.add_dream("一个月前的梦", 0.0, 0.0, now_ts - 40 * 86400,
+                                   created_at=now_ts - 31 * 86400)
+        data = await plugin.webui_memories()
+        self.assertEqual(set(data), {"generated_at", "last_diary_day", "diary_count", "dream_count",
+                                     "latest_diary", "diaries", "diaries_full_text",
+                                     "latest_dream", "dreams"})
+        self.assertEqual(data["last_diary_day"], self.now.date().isoformat())
+        self.assertEqual(data["diary_count"], 14)
+        self.assertEqual(len(data["diaries"]), 14)
+        self.assertEqual(data["dream_count"], 12)  # 计数走 30 天窗口
+        self.assertEqual(len(data["dreams"]), 12)
+        for item in data["diaries"]:
+            self.assertEqual(set(item), {"day", "title", "mood_summary", "content"})
+        self.assertEqual(data["diaries"][0]["day"], self.now.date().isoformat())
+        self.assertEqual(data["diaries"][0]["title"], "日记0")
+        latest_diary = data["latest_diary"]
+        self.assertIsNotNone(latest_diary)
+        self.assertEqual(set(latest_diary), {"day", "title", "content", "mood_summary"})
+        self.assertEqual(latest_diary["day"], self.now.date().isoformat())
+        self.assertEqual(latest_diary["title"], "日记0")
+        self.assertEqual(latest_diary["mood_summary"], "心情0")
+        self.assertEqual(latest_diary["content"], "正文" * 800)  # 正文全量透出，不再截断
+        self.assertIn("正文", data["diaries_full_text"])
+        self.assertIn("日记0", data["diaries_full_text"])
+        latest_dream = data["latest_dream"]
+        self.assertIsNotNone(latest_dream)
+        self.assertEqual(set(latest_dream), {"created_at", "content", "mood_delta",
+                                             "energy_delta", "fragments"})
+        self.assertEqual(latest_dream["content"], "梦境0")
+        self.assertEqual(latest_dream["fragments"], ["碎片0a", "碎片0b"])
+        self.assertAlmostEqual(latest_dream["mood_delta"], 0.1)
+        self.assertAlmostEqual(latest_dream["energy_delta"], -0.2)
+        for item in data["dreams"]:
+            self.assertEqual(set(item), {"created_at", "content", "mood_delta", "energy_delta"})
+        self.assertEqual(data["dreams"][-1]["content"], "梦境0")  # 最近的排在最后
+        # 31 天前的旧梦不进 30 天窗口。
+        self.assertNotIn("一个月前的梦", json.dumps(data, ensure_ascii=False))
+
+    async def test_memories_without_data_returns_nulls(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_memories()
+        self.assertEqual(data["last_diary_day"], "")
+        self.assertEqual(data["diary_count"], 0)
+        self.assertEqual(data["dream_count"], 0)
+        self.assertEqual(set(data["latest_diary"]), {"day", "title", "content", "mood_summary"})
+        self.assertEqual(data["latest_diary"]["title"], "")
+        self.assertEqual(set(data["latest_dream"]),
+                         {"created_at", "content", "mood_delta", "energy_delta", "fragments"})
+        self.assertEqual(data["latest_dream"]["content"], "")
+        self.assertEqual(data["diaries"], [])
+        self.assertEqual(data["dreams"], [])
+
+
+class V11412WebuiDatesTests(unittest.IsolatedAsyncioTestCase):
+    """webui_dates：年度周期下次发生/倒计时、按 occurrence 升序、候选字段与 30 天计数。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.now = datetime(2026, 10, 8, 9, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self) -> MaiLifePlugin:
+        return await build_plugin(self.store, self.config, llm=DummyLLM(), now=self.now)
+
+    async def _seed(self) -> None:
+        await self.store.sync_users([UserProfile(user_id="1", initial_temperature=60.0)])
+        await self.store.update_user_display_name("1", "小甜")
+        now_ts = self.now.timestamp()
+        await self.store.add_important_date("1", "小甜生日", "2020-10-15", "annual", "chat", now_ts)
+        await self.store.add_important_date("1", "项目截止", "2026-12-31", "none", "chat", now_ts)
+        await self.store.add_important_date("1", "元旦", "2026-01-01", "annual", "chat", now_ts)
+        await self.store.add_important_date("1", "去年聚会", "2025-05-01", "none", "chat", now_ts)
+        await self.store.add_date_candidate("1", "妈妈生日（待确认）", "下周三左右",
+                                            "2026-10-14", 0.62, "用户原话摘要", now_ts)
+
+    async def test_dates_occurrence_countdown_and_candidates(self):
+        plugin = await self._plugin()
+        await self._seed()
+        data = await plugin.webui_dates()
+        self.assertEqual(set(data), {"counts", "dates", "candidates"})
+        self.assertEqual(set(data["counts"]), {"dates", "candidates", "within_30d"})
+        self.assertEqual(data["counts"], {"dates": 4, "candidates": 1, "within_30d": 1})
+        self.assertEqual(len(data["dates"]), 4)
+        for item in data["dates"]:
+            self.assertEqual(set(item), {"id", "user_id", "user_name", "event_name", "event_date",
+                                         "recurrence", "occurrence", "countdown", "days_left"},
+                             f"date 字段超出契约: {sorted(item)}")
+        # 按下次发生升序：7 天后的生日排最前，已过的沉底。
+        self.assertEqual([item["event_name"] for item in data["dates"]],
+                         ["小甜生日", "项目截止", "元旦", "去年聚会"])
+        birthday = data["dates"][0]
+        self.assertEqual(birthday["occurrence"], "2026-10-15")
+        self.assertEqual(birthday["days_left"], 7)
+        self.assertEqual(birthday["countdown"], "7 天后")
+        self.assertEqual(birthday["recurrence"], "annual")
+        self.assertEqual(birthday["user_id"], "1")
+        self.assertEqual(birthday["user_name"], "小甜")
+        self.assertEqual(data["dates"][1]["days_left"], 84)
+        self.assertEqual(data["dates"][2]["occurrence"], "2027-01-01")  # 年度周期跨年推算
+        self.assertEqual(data["dates"][2]["days_left"], 85)
+        past = data["dates"][3]
+        self.assertLess(past["days_left"], 0)
+        self.assertTrue(past["countdown"].startswith("已过"))
+        self.assertEqual(past["occurrence"], "2025-05-01")
+        candidate = data["candidates"][0]
+        self.assertEqual(set(candidate), {"id", "user_id", "user_name", "event_name", "date_text",
+                                          "suggested_date", "confidence", "created_at"},
+                         f"candidate 字段超出契约: {sorted(candidate)}")
+        self.assertEqual(candidate["user_name"], "小甜")
+        self.assertEqual(candidate["date_text"], "下周三左右")
+        self.assertEqual(candidate["suggested_date"], "2026-10-14")
+        self.assertAlmostEqual(candidate["confidence"], 0.62)
+        self.assertGreater(candidate["created_at"], 0)
+
+    async def test_dates_capped_at_50_and_candidates_at_20(self):
+        plugin = await self._plugin()
+        now_ts = self.now.timestamp()
+        for index in range(55):
+            await self.store.add_important_date("1", f"事件{index}", "2027-03-01",
+                                                "none", "chat", now_ts)
+        for index in range(25):
+            await self.store.add_date_candidate("1", f"候选{index}", "那天", "2027-04-01",
+                                                0.5, "摘要", now_ts)
+        data = await plugin.webui_dates()
+        self.assertEqual(len(data["dates"]), 50)
+        self.assertEqual(len(data["candidates"]), 20)
+        self.assertEqual(data["counts"]["dates"], 55)   # 计数不受列表限量影响
+        self.assertEqual(data["counts"]["candidates"], 20)
+
+    async def test_dates_unknown_user_name_falls_back(self):
+        plugin = await self._plugin()
+        await self.store.add_important_date("999", "陌生人的生日", "2026-11-01", "annual",
+                                            "chat", self.now.timestamp())
+        data = await plugin.webui_dates()
+        self.assertEqual(data["dates"][0]["user_name"], "未读取昵称")
+
+
+class V11412WebuiUsageTests(unittest.IsolatedAsyncioTestCase):
+    """webui_usage：今日聚合、label=source/task、搜索 API 与近 7 日差分序列（负值钳 0）。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.now = datetime(2026, 10, 8, 15, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self) -> MaiLifePlugin:
+        return await build_plugin(self.store, self.config, llm=DummyLLM(), now=self.now)
+
+    async def _seed_usage(self, *, day_offset: int, hour: int, source: str, task: str,
+                          total_tokens: int, calls: int = 1, latency_ms: float = 120.44) -> None:
+        moment = (self.now + timedelta(days=day_offset)).replace(
+            hour=hour, minute=0, second=0, microsecond=0)
+        for index in range(calls):
+            await self.store.record_llm_usage(
+                created_at=moment.timestamp() + index, source=source, task_name=task,
+                model_name="planner", request_type="chat",
+                prompt_tokens=total_tokens // 2,
+                completion_tokens=total_tokens - total_tokens // 2,
+                total_tokens=total_tokens, latency_ms=latency_ms, success=True)
+
+    async def _seed_search(self, *, day_offset: int, provider_type: str, calls: int = 1,
+                           latency_ms: float = 80.44) -> None:
+        moment = (self.now + timedelta(days=day_offset)).replace(
+            hour=12, minute=0, second=0, microsecond=0)
+        for index in range(calls):
+            await self.store.record_search_api_event(
+                created_at=moment.timestamp() + index, operation="tool_search",
+                provider_id="p1-bocha", provider_type=provider_type, key_fingerprint="fp",
+                success=True, status_code=200, latency_ms=latency_ms, result_count=4,
+                error_class="")
+
+    async def test_usage_totals_tokens_searches_and_daily_diff(self):
+        plugin = await self._plugin()
+        await self._seed_usage(day_offset=0, hour=10, source="plugin", task="diary", total_tokens=100)
+        await self._seed_usage(day_offset=0, hour=11, source="plugin", task="dream", total_tokens=40)
+        await self._seed_usage(day_offset=-1, hour=10, source="plugin", task="diary", total_tokens=50)
+        await self._seed_usage(day_offset=-3, hour=10, source="plugin", task="diary", total_tokens=30)
+        await self._seed_search(day_offset=0, provider_type="bocha", calls=2)
+        data = await plugin.webui_usage()
+        self.assertEqual(set(data), {"day", "generated_at", "totals", "tokens", "searches", "daily"})
+        self.assertEqual(set(data["totals"]), {"tokens_today", "calls_today", "search_calls_today",
+                                               "tokens_7d", "calls_7d"})
+        self.assertEqual(data["day"], self.now.date().isoformat())
+        self.assertTrue(str(data["generated_at"] or ""))
+        self.assertEqual(data["totals"], {"tokens_today": 140, "calls_today": 2,
+                                          "search_calls_today": 2,
+                                          "tokens_7d": 220, "calls_7d": 4})
+        labels = {item["label"]: item for item in data["tokens"]}
+        self.assertEqual(set(labels), {"plugin/diary", "plugin/dream"})  # label=source/task
+        for item in data["tokens"]:
+            self.assertEqual(set(item), {"label", "source", "task_name", "calls", "successes",
+                                         "prompt_tokens", "completion_tokens", "total_tokens",
+                                         "avg_latency_ms"},
+                             f"token 字段超出契约: {sorted(item)}")
+        self.assertEqual(labels["plugin/diary"]["calls"], 1)
+        self.assertEqual(labels["plugin/diary"]["total_tokens"], 100)
+        self.assertEqual(labels["plugin/diary"]["prompt_tokens"], 50)
+        self.assertEqual(labels["plugin/diary"]["completion_tokens"], 50)
+        self.assertEqual(labels["plugin/diary"]["successes"], 1)
+        self.assertEqual(labels["plugin/diary"]["avg_latency_ms"], round(120.44, 1))  # 耗时一位小数
+        searches = data["searches"]
+        self.assertEqual(len(searches), 1)
+        self.assertEqual(set(searches[0]), {"provider_type", "calls", "successes", "results",
+                                            "average_latency_ms", "last_at"})
+        self.assertEqual(searches[0]["provider_type"], "bocha")
+        self.assertEqual(searches[0]["calls"], 2)
+        self.assertEqual(searches[0]["successes"], 2)
+        self.assertEqual(searches[0]["results"], 8)
+        self.assertEqual(searches[0]["average_latency_ms"], round(80.44, 1))
+        self.assertGreater(searches[0]["last_at"], 0)
+        # 近 7 日：由每日 0 点累计值差分得到，负值钳 0。
+        self.assertEqual([item["day"] for item in data["daily"]],
+                         [(self.now - timedelta(days=offset)).date().isoformat()
+                          for offset in range(6, -1, -1)])
+        self.assertEqual([item["tokens"] for item in data["daily"]], [0, 0, 0, 30, 0, 50, 140])
+        self.assertEqual([item["calls"] for item in data["daily"]], [0, 0, 0, 1, 0, 1, 2])
+        for item in data["daily"]:
+            self.assertEqual(set(item), {"day", "tokens", "calls"})
+            self.assertGreaterEqual(item["tokens"], 0)
+            self.assertGreaterEqual(item["calls"], 0)
+
+    async def test_usage_without_records_returns_zeroed(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_usage()
+        self.assertEqual(data["tokens"], [])
+        self.assertEqual(data["searches"], [])
+        self.assertEqual(data["totals"], {"tokens_today": 0, "calls_today": 0,
+                                          "search_calls_today": 0, "tokens_7d": 0, "calls_7d": 0})
+        self.assertEqual(len(data["daily"]), 7)
+        self.assertTrue(all(item["tokens"] == 0 and item["calls"] == 0 for item in data["daily"]))
+
+
+class V11412WebuiConfigSummaryTests(unittest.IsolatedAsyncioTestCase):
+    """webui_config_summary：19 个配置节键齐全、布尔转「开启/关闭」、窗口串与本 API 不出 Key。"""
+
+    SECTIONS = ("plugin", "users", "models", "environment", "linkage", "debounce", "recall",
+                "context", "rest_gate", "memory", "information", "news", "search",
+                "search_api", "social", "creation", "schedule", "proactive", "usage")
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.config.users.profiles = [UserProfile(user_id="1", role="owner"),
+                                      UserProfile(user_id="2", enabled=False)]
+        self.config.environment.city = "杭州"
+        self.config.environment.weather_refresh_minutes = 45
+        self.config.models.fast_task = "fast-x"
+        self.config.models.reasoning_task = "reason-x"
+        self.config.linkage.drawpic_enabled = True
+        self.config.debounce.group_enabled = True
+        self.config.recall.cache_summary_enabled = True
+        self.config.rest_gate.wake_probability = 0.42
+        self.config.rest_gate.night_start = "23:00"
+        self.config.rest_gate.night_end = "07:30"
+        self.config.search_api.providers = [SearchProviderProfile(
+            enabled=True, provider_type="bocha", api_keys=["sk-top-secret"])]
+        self.now = datetime(2026, 10, 8, 9, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self, *, drawpic_loaded: bool | None = True) -> MaiLifePlugin:
+        plugin = await build_plugin(self.store, self.config, llm=DummyLLM(), now=self.now)
+        plugin._drawpic_loaded = drawpic_loaded
+        return plugin
+
+    async def test_config_summary_sections_keys_and_switch_words(self):
+        plugin = await self._plugin()
+        data = await plugin.webui_config_summary()
+        self.assertEqual(set(data), set(self.SECTIONS))
+        self.assertEqual(set(data["plugin"]), {"enabled", "version"})
+        self.assertEqual(data["plugin"], {"enabled": "开启", "version": PLUGIN_VERSION})
+        self.assertEqual(data["users"], {"configured": 2, "enabled": 1})
+        self.assertEqual(data["models"], {"fast_task": "fast-x", "reasoning_task": "reason-x"})
+        self.assertEqual(set(data["environment"]), {"timezone", "city", "weather_refresh_minutes"})
+        self.assertEqual(data["environment"]["city"], "杭州")
+        self.assertEqual(data["environment"]["weather_refresh_minutes"], 45)
+        self.assertEqual(data["linkage"], {"drawpic_enabled": "开启", "drawpic_detected": "开启"})
+        self.assertEqual(data["debounce"], {"private": "开启", "group": "开启"})
+        self.assertEqual(set(data["recall"]), {"enabled", "cache_summary", "summary_ttl_minutes",
+                                               "summary_max_chars"})
+        self.assertEqual(data["recall"]["cache_summary"], "开启")
+        self.assertEqual(data["recall"]["enabled"], "开启")
+        self.assertIsInstance(data["recall"]["summary_ttl_minutes"], int)
+        self.assertEqual(set(data["context"]), {"enabled", "continuity_enabled",
+                                                "continuity_interval_minutes", "prompt_max_chars"})
+        self.assertEqual(data["context"]["enabled"], "开启")
+        # 休息闸门：窗口串由起止时刻拼接，静默时长取 bedtime 常量。
+        self.assertEqual(set(data["rest_gate"]), {"enabled", "mode", "wake_probability",
+                                                  "llm_threshold", "awake_grace_minutes",
+                                                  "silence_minutes", "night_window", "nap_window",
+                                                  "group_enabled", "group_mode",
+                                                  "group_night_window", "group_nap_window"})
+        self.assertEqual(data["rest_gate"]["night_window"], "23:00-07:30")
+        self.assertEqual(data["rest_gate"]["nap_window"], "12:00-14:30")
+        self.assertEqual(data["rest_gate"]["group_night_window"], "22:30-08:00")
+        self.assertEqual(data["rest_gate"]["group_nap_window"], "12:00-14:30")
+        self.assertEqual(data["rest_gate"]["silence_minutes"], BEDTIME_SILENCE_MINUTES)
+        self.assertEqual(data["rest_gate"]["mode"], "probability")
+        self.assertAlmostEqual(data["rest_gate"]["wake_probability"], 0.42)
+        self.assertEqual(data["rest_gate"]["enabled"], "关闭")
+        self.assertEqual(data["rest_gate"]["group_enabled"], "关闭")
+        self.assertEqual(set(data["memory"]), {"enabled", "dream_fragments_enabled",
+                                               "dream_fragment_count", "diary_enabled", "diary_hour",
+                                               "diary_max_chars", "important_dates_enabled",
+                                               "date_model_analysis_enabled",
+                                               "date_candidate_retention_days",
+                                               "date_reminder_lead_days"})
+        self.assertEqual(data["memory"]["diary_enabled"], "开启")
+        self.assertEqual(set(data["information"]), {"enabled", "association_enabled",
+                                                    "association_threshold",
+                                                    "proactive_share_enabled",
+                                                    "context_item_limit"})
+        self.assertEqual(set(data["news"]), {"enabled", "daily_max", "full_text_count",
+                                             "retention_days"})
+        self.assertEqual(set(data["search"]), {"enabled", "daily_max", "include_chat_topics",
+                                               "note_retention_days"})
+        self.assertEqual(set(data["search_api"]), {"tool_enabled", "history_enabled",
+                                                   "history_retention_days", "timeout_seconds",
+                                                   "max_attempts", "max_results",
+                                                   "provider_count"})
+        self.assertEqual(data["search_api"]["provider_count"], 1)
+        self.assertEqual(set(data["social"]), {"enabled", "owner_group_to_private_enabled",
+                                               "inactivity_hours", "group_share_daily_max",
+                                               "group_share_min_interval_minutes",
+                                               "interesting_threshold", "summary_retention_hours",
+                                               "relay_pending_seconds", "groups"})
+        self.assertEqual(data["social"]["groups"], 0)
+        self.assertEqual(set(data["creation"]), {"enabled", "plaintext_storage_acknowledged",
+                                                 "daily_max", "minimum_energy",
+                                                 "public_works_enabled",
+                                                 "inspiration_lookback_days",
+                                                 "external_reading_enabled",
+                                                 "patrol_interval_minutes"})
+        self.assertEqual(set(data["schedule"]), {"generate_hour", "detail_lead_minutes",
+                                                 "template_file"})
+        self.assertEqual(set(data["proactive"]), {"enabled", "patrol_interval_minutes",
+                                                  "min_interval_minutes",
+                                                  "recent_user_silence_minutes",
+                                                  "pending_expire_seconds",
+                                                  "max_retries_per_opportunity",
+                                                  "minimum_energy", "score_threshold"})
+        self.assertEqual(set(data["usage"]), {"enabled", "retention_days"})
+        serialized = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn("sk-top-secret", serialized)  # 本 API 不出任何 Key
+        self.assertNotIn("true", serialized)           # 布尔一律中文开关词
+        self.assertNotIn("false", serialized)
+
+    async def test_config_summary_drawpic_detected_follows_runtime(self):
+        plugin = await self._plugin(drawpic_loaded=None)
+        data = await plugin.webui_config_summary()
+        self.assertEqual(data["linkage"], {"drawpic_enabled": "开启", "drawpic_detected": "关闭"})
+
+
+class V11412WebuiAdminSummaryTests(unittest.IsolatedAsyncioTestCase):
+    """webui_admin_summary：概览/群聊/主动/来源四 scope，布尔转「开/关」，Key 只出指纹。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.config.social.enabled = True
+        self.config.information.enabled = True  # 概览的 network_enabled 取联网总开关
+        self.config.social.groups = [SocialGroupProfile(
+            group_id="100", enabled=True, observe_enabled=True, relay_target_enabled=False)]
+        self.config.search_api.providers = [SearchProviderProfile(
+            enabled=True, provider_type="bocha", api_keys=["sk-admin-secret"],
+            endpoint="https://api.bocha.com?key=sk-admin-secret",
+            model="bocha-sk-admin-secret")]
+        self.config.creation.external_reading_enabled = True
+        self.config.creation.external_reading_api_name = "外读 API"
+        self.now = datetime(2026, 10, 8, 9, 0, tzinfo=TZ)
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _plugin(self) -> MaiLifePlugin:
+        return await build_plugin(self.store, self.config, llm=DummyLLM(), now=self.now)
+
+    async def _seed(self) -> None:
+        await self.store.sync_users([UserProfile(user_id="1", role="owner", initial_temperature=70.0),
+                                     UserProfile(user_id="2", initial_temperature=30.0)])
+        await self.store.upsert_group_directory("100", "测试群", "stream-100", self.now.timestamp())
+        await self.store.create_bookshelf_document({
+            "id": "w1", "doc_type": "work", "title": "公开作品", "privacy": "public",
+            "status": "archived", "summary": "摘要", "created_at": self.now.timestamp()})
+        await self.store.create_bookshelf_document({
+            "id": "w2", "doc_type": "work", "title": "私人作品", "privacy": "private",
+            "status": "archived", "summary": "摘要", "created_at": self.now.timestamp()})
+        await self.store.add_date_candidate("1", "待确认事件", "下周", "2026-10-15", 0.5,
+                                            "摘要", self.now.timestamp())
+        self.store.conn.execute(
+            "INSERT INTO proactive_events(id,user_id,opportunity_id,stream_id,status,created_at,expires_at)"
+            " VALUES('e1','1','opp-1','stream-1','pending',?,?)",
+            (self.now.timestamp(), self.now.timestamp() + 3600))
+        self.store.conn.execute(
+            "INSERT INTO proactive_events(id,user_id,opportunity_id,stream_id,status,created_at,expires_at,sent_at)"
+            " VALUES('e2','2','opp-2','stream-2','sent',?,?,?)",
+            (self.now.timestamp() - 7200, self.now.timestamp() - 3600, self.now.timestamp() - 3600))
+        self.store.conn.execute(
+            "INSERT INTO proactive_skip_stats(user_id,reason,day,count)"
+            " VALUES('1','low_energy',?,3),('2','low_energy',?,1)",
+            (self.now.date().isoformat(), self.now.date().isoformat()))
+        self.store.conn.commit()
+        await self.store.record_llm_usage(
+            created_at=self.now.timestamp(), source="plugin", task_name="diary",
+            model_name="planner", request_type="chat", prompt_tokens=60, completion_tokens=40,
+            total_tokens=100, latency_ms=100.0, success=True)
+        await self.store.record_search_api_event(
+            created_at=self.now.timestamp(), operation="tool_search", provider_id="p1-bocha",
+            provider_type="bocha", key_fingerprint="fp", success=True, status_code=200,
+            latency_ms=50.0, result_count=2, error_class="")
+        # Key 运行态与 AdminService._provider_id / _fingerprint 同一算法，健康状态才能对上。
+        provider = self.config.search_api.providers[0]
+        signature = f"{provider.provider_type}:{provider.endpoint}:{provider.model}"
+        provider_id = f"p1-bocha-{hashlib.sha256(signature.encode()).hexdigest()[:8]}"
+        fingerprint = hashlib.sha256("sk-admin-secret".encode()).hexdigest()[:16]
+        await self.store.save_search_key_runtime(
+            provider_id, fingerprint, status="cooldown", cooldown_until=self.now.timestamp() + 600,
+            failure_count=2, error_class="rate_limit", used_at=self.now.timestamp())
+
+    async def test_admin_summary_scopes_and_key_fingerprints(self):
+        plugin = await self._plugin()
+        await self._seed()
+        data = await plugin.webui_admin_summary()
+        self.assertEqual(set(data), {"overview", "groups", "proactive", "sources"})
+        overview = data["overview"]
+        self.assertEqual(set(overview), {"version", "users", "owners", "pending_dates",
+                                         "pending_proactive", "bookshelf_documents",
+                                         "private_documents", "token_calls_today",
+                                         "token_total_today", "search_calls_today",
+                                         "social_enabled", "creation_enabled", "network_enabled"})
+        self.assertEqual(overview["version"], PLUGIN_VERSION)
+        self.assertEqual(overview["users"], 2)
+        self.assertEqual(overview["owners"], 1)
+        self.assertEqual(overview["pending_dates"], 1)
+        self.assertEqual(overview["pending_proactive"], 1)
+        self.assertEqual(overview["bookshelf_documents"], 2)
+        self.assertEqual(overview["private_documents"], 1)
+        self.assertEqual(overview["token_calls_today"], 1)
+        self.assertEqual(overview["token_total_today"], 100)
+        self.assertEqual(overview["search_calls_today"], 1)
+        # 管理摘要布尔一律「开/关」短词。
+        self.assertEqual(overview["social_enabled"], "开")
+        self.assertEqual(overview["creation_enabled"], "关")
+        self.assertEqual(overview["network_enabled"], "开")
+        groups = data["groups"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(set(groups[0]), {"group_id", "group_name", "enabled", "observe_enabled",
+                                          "relay_target_enabled", "stream_known"})
+        self.assertEqual(groups[0]["group_id"], "100")
+        self.assertEqual(groups[0]["group_name"], "测试群")
+        self.assertEqual(groups[0]["enabled"], "开")
+        self.assertEqual(groups[0]["observe_enabled"], "开")
+        self.assertEqual(groups[0]["relay_target_enabled"], "关")
+        self.assertEqual(groups[0]["stream_known"], "开")
+        proactive = data["proactive"]
+        self.assertEqual(set(proactive), {"candidates", "skips"})
+        self.assertEqual(len(proactive["candidates"]), 2)
+        for item in proactive["candidates"]:
+            self.assertEqual(set(item), {"user_id", "topic", "status", "created_at", "expires_at"},
+                             f"candidate 字段超出契约: {sorted(item)}")
+        self.assertEqual({item["status"] for item in proactive["candidates"]}, {"pending", "sent"})
+        skips = proactive["skips"]
+        self.assertEqual(len(skips), 1)
+        self.assertEqual(set(skips[0]), {"reason", "total", "users"})
+        self.assertEqual(skips[0], {"reason": "low_energy", "total": 4, "users": 2})
+        sources = data["sources"]
+        self.assertEqual(set(sources), {"information_enabled", "news_enabled", "search_enabled",
+                                        "external_reading", "providers", "keys"})
+        self.assertEqual(sources["information_enabled"], "开")
+        self.assertEqual(sources["news_enabled"], "关")
+        self.assertEqual(sources["external_reading"], {"enabled": "开", "api_name": "外读 API"})
+        provider = sources["providers"][0]
+        self.assertEqual(set(provider), {"provider_id", "provider_type", "enabled", "key_count",
+                                         "endpoint", "model"})
+        self.assertEqual(provider["provider_type"], "bocha")
+        self.assertEqual(provider["enabled"], "开")
+        self.assertEqual(provider["key_count"], 1)
+        key = sources["keys"][0]
+        self.assertEqual(set(key), {"provider_id", "fingerprint", "status", "cooldown_until",
+                                    "failure_count", "last_error_class"})
+        self.assertEqual(key["status"], "cooldown")
+        self.assertEqual(key["failure_count"], 2)
+        self.assertEqual(key["last_error_class"], "rate_limit")
+        self.assertGreater(key["cooldown_until"], 0)
+        serialized = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn("sk-admin-secret", serialized)  # Key 只出指纹，endpoint/model 脱敏
+        self.assertIn(key["fingerprint"], serialized)
+
+    async def test_admin_summary_without_data_returns_empty_scopes(self):
+        # 用默认配置（无 QQ 群白名单）验证空 scope，不用 asyncSetUp 里带群配置的那个。
+        plugin = await build_plugin(self.store, MaiLifeSettings(), llm=DummyLLM(), now=self.now)
+        data = await plugin.webui_admin_summary()
+        self.assertEqual(data["groups"], [])
+        self.assertEqual(data["proactive"], {"candidates": [], "skips": []})
+        self.assertEqual(data["sources"]["keys"], [])
+        self.assertIsInstance(data["sources"]["providers"], list)
+        self.assertEqual(data["overview"]["users"], 0)
+
+
+class V11412WebuiErrorPathTests(unittest.IsolatedAsyncioTestCase):
+    """v1.14.12 异常路径：依赖缺失或内部异常时返回 {"success":False,"error":...} 而非抛出。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    @classmethod
+    def _apis(cls, plugin: MaiLifePlugin) -> tuple[Any, ...]:
+        return tuple(getattr(plugin, name) for name in WEBUI_API_NAMES)
+
+    async def test_fresh_plugin_without_dependencies_returns_error_dict(self):
+        plugin = MaiLifePlugin()  # 未 on_load：store/env/schedule 全部缺失
+        for api in self._apis(plugin):
+            with self.subTest(api=api.__name__):
+                data = await api()
+                self.assertIsInstance(data, dict)
+                self.assertIs(data.get("success"), False)
+                self.assertTrue(str(data.get("error") or ""), "缺少 error 说明")
+
+    async def test_store_failure_is_reported_not_raised(self):
+        plugin = await build_plugin(self.store, MaiLifeSettings(), llm=DummyLLM())
+        plugin._store = _ExplodingStore()
+        # webui_config_summary 是纯配置聚合、不碰 store，单独在下一个用例验证。
+        store_apis = tuple(getattr(plugin, name) for name in WEBUI_API_NAMES
+                           if name != "webui_config_summary")
+        for api in store_apis:
+            with self.subTest(api=api.__name__):
+                data = await api()
+                self.assertIs(data.get("success"), False)
+                self.assertTrue(str(data.get("error") or ""), "缺少 error 说明")
+
+    async def test_config_summary_does_not_touch_store(self):
+        plugin = await build_plugin(self.store, MaiLifeSettings(), llm=DummyLLM())
+        plugin._store = _ExplodingStore()
+        data = await plugin.webui_config_summary()
+        self.assertNotIn("error", data)  # 存储故障不影响纯配置摘要
+        self.assertIn("plugin", data)
+
+    async def test_overview_schedule_failure_is_reported_not_raised(self):
+        plugin = await build_plugin(self.store, MaiLifeSettings(), llm=_WebuiLLM())
+
+        async def boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("schedule.context 注入故障")
+
+        plugin._schedule.context = boom  # type: ignore[method-assign]
+        data = await plugin.webui_status_overview()
+        self.assertIs(data.get("success"), False)
+        self.assertTrue(str(data.get("error") or ""))
+
+
+class V11412WebuiJsonStructureTests(unittest.TestCase):
+    """webui.json 声明结构：schema_version/workspace_title/页数/查询只绑已注册 API/组件白名单。
+
+    白名单对齐宿主真实 schema（MaiBot src/plugin_runtime/webui_schema.py 的 WebUINode：
+    19 种组件 + when/selection/detail 等属性），不是公开文档里的旧 13 种。
+    """
+
+    COMMON_KEYS = {"type", "label", "when"}
+    COMPONENT_KEYS = {
+        "stack": {"children"},
+        "grid": {"children", "columns"},
+        "card": {"children"},
+        "tabs": {"children"},
+        "text": {"value"},
+        "stat": {"value"},
+        "table": {"value", "columns", "selection", "detail"},
+        "chart": {"value", "chart_type", "x", "y"},
+        "input": {"name", "value"},
+        "date": {"name", "value"},
+        "select": {"name", "value", "options"},
+        "switch": {"name", "value"},
+        "button": {"action", "variant"},
+        "upload": {"action"},
+        "dialog": {"name", "children"},
+        "collapsible": {"children", "default_open"},
+        "repeat": {"value", "name", "children", "max_items"},
+        "gallery": {"value", "columns"},
+        "pagination": {"value", "name"},
+    }
+    FIELD_RE = re.compile(r"^(?:[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*)?$")
+
+    def setUp(self):
+        self.path = Path(__file__).parents[1] / "webui.json"
+        self.declaration = json.loads(self.path.read_text(encoding="utf-8-sig"))
+
+    def _registered_apis(self) -> set[str]:
+        plugin = MaiLifePlugin()
+        return {str(item.get("name") or "") for item in plugin.get_components()
+                if str(item.get("type") or "") == "API"}
+
+    def test_schema_version_and_workspace_title(self):
+        self.assertEqual(self.declaration.get("schema_version"), 1)
+        self.assertTrue(str(self.declaration.get("workspace_title") or ""))
+
+    def test_pages_within_limits_and_unique_ids(self):
+        pages = self.declaration.get("pages") or []
+        self.assertGreaterEqual(len(pages), 1)
+        self.assertLessEqual(len(pages), 20)
+        ids = [str(page.get("id") or "") for page in pages]
+        self.assertEqual(len(set(ids)), len(ids))
+        self.assertTrue(any(str(page.get("placement") or "") == "workspace" for page in pages))
+        for page in pages:
+            self.assertIn(str(page.get("placement") or ""), {"sidebar", "workspace"})
+            self.assertIn(str(page.get("icon") or ""),
+                          {"puzzle", "chart", "settings", "database", "list"})
+            self.assertTrue(str(page.get("title") or ""))
+
+    def test_queries_only_bind_registered_apis(self):
+        registered = self._registered_apis()
+        bound: set[str] = set()
+        for page in self.declaration["pages"]:
+            queries = page.get("queries") or {}
+            self.assertLessEqual(len(queries), 10, f"{page['id']} 查询超过 10 个")
+            for alias, binding in queries.items():
+                self.assertEqual(binding.get("version"), "1", f"查询 {alias} 版本不是 1")
+                self.assertIn(binding.get("api"), registered,
+                              f"查询 {alias} 绑定未注册 API: {binding.get('api')}")
+                bound.add(str(binding.get("api")))
+            # 只读约束：零 actions，写操作全部走命令层。
+            self.assertEqual(page.get("actions") or {}, {}, f"{page['id']} 不得声明 actions")
+        # 11 个 WebUI 只读 API 必须全部被页面消费，也不许多绑其他 API。
+        self.assertEqual(bound, set(WEBUI_API_NAMES))
+
+    def test_components_use_whitelist_and_data_references(self):
+        for page in self.declaration["pages"]:
+            queries = set((page.get("queries") or {}).keys())
+            selections: set[str] = set()
+            pending = [(node, 1) for node in page.get("content") or []]
+            count = 0
+            while pending:
+                node, depth = pending.pop()
+                count += 1
+                self.assertLessEqual(depth, 8, f"{page['id']} 嵌套超过 8 层")
+                self.assertLessEqual(count, 200, f"{page['id']} 组件超过 200 个")
+                kind = str(node.get("type") or "")
+                self.assertIn(kind, self.COMPONENT_KEYS, f"组件类型不在白名单: {kind}")
+                extra = set(node) - self.COMPONENT_KEYS[kind] - self.COMMON_KEYS
+                self.assertEqual(extra, set(), f"{kind} 含协议外属性: {sorted(extra)}")
+                if node.get("selection") is not None:
+                    selections.add(str(node["selection"]))
+                    if node.get("detail") is not None:
+                        self.assertIsInstance(node["detail"], str)
+                if kind == "dialog":
+                    self.assertEqual(depth, 1, "dialog 必须声明在 content 顶层")
+                    self.assertTrue(node.get("name"), "dialog 必须声明 name")
+                value = node.get("value")
+                if isinstance(value, dict):
+                    self.assertEqual(set(value) - {"source", "field", "scope"}, set(),
+                                     f"{kind} 的数据引用含协议外键: {sorted(value)}")
+                    scope = value.get("scope", "query")
+                    self.assertIn(scope, {"query", "selection", "item"})
+                    if scope == "query":
+                        self.assertIn(value["source"], queries,
+                                      f"数据引用未声明查询: {value['source']}")
+                    else:
+                        # selection/item 是交互上下文源，由 table.selection / repeat.name 声明。
+                        self.assertTrue(value["source"], f"{kind} 的 {scope} 引用缺少 source")
+                    self.assertRegex(value.get("field", ""), self.FIELD_RE)
+                if kind in {"table", "chart", "gallery", "pagination", "repeat"}:
+                    self.assertIsInstance(value, dict, f"{kind} 必须绑定数据引用")
+                if kind == "table":
+                    columns = node.get("columns") or []
+                    self.assertGreaterEqual(len(columns), 1)
+                    self.assertLessEqual(len(columns), 20)
+                    for column in columns:
+                        self.assertEqual(set(column), {"field", "label"})
+                if kind == "grid":
+                    self.assertIsInstance(node.get("columns"), int)
+                    self.assertGreaterEqual(node["columns"], 1)
+                    self.assertLessEqual(node["columns"], 4)
+                if kind == "chart":
+                    self.assertIn(str(node.get("chart_type") or ""), {"line", "bar"})
+                    self.assertTrue(node.get("x") and node.get("y"))
+                if kind == "tabs":
+                    self.assertTrue(node.get("children"))
+                    for child in node["children"]:
+                        self.assertTrue(child.get("label"), "tabs 子节点必须有 label")
+                if node.get("when") is not None:
+                    reference = node["when"].get("reference") or {}
+                    self.assertIn(reference.get("scope", "query"), {"query", "selection", "item"})
+                    if reference.get("scope", "query") == "query":
+                        self.assertIn(reference.get("source"), queries,
+                                      f"when 引用未声明查询: {reference.get('source')}")
+                pending.extend((child, depth + 1) for child in node.get("children") or [])
+
+    def test_selection_scoped_bindings_declare_their_source(self):
+        """scope:selection 的绑定必须能找到同页 table.selection 声明的行上下文名。"""
+        for page in self.declaration["pages"]:
+            declared = {str(node.get("selection")) for node in self._walk(page)
+                        if node.get("selection")}
+            for node in self._walk(page):
+                for reference in self._references(node):
+                    if reference.get("scope") != "selection":
+                        continue
+                    self.assertIn(reference.get("source"), declared,
+                                  f"selection 引用未声明来源: {reference.get('source')}")
+
+    def _walk(self, page: dict[str, Any]):
+        pending = list(page.get("content") or [])
+        while pending:
+            node = pending.pop()
+            yield node
+            pending.extend(node.get("children") or [])
+
+    def _references(self, node: dict[str, Any]) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        if isinstance(node.get("value"), dict):
+            refs.append(node["value"])
+        when = node.get("when")
+        if isinstance(when, dict) and isinstance(when.get("reference"), dict):
+            refs.append(when["reference"])
+        return refs
+
+    def test_declaration_size_within_host_limits(self):
+        raw = self.path.read_bytes()
+        self.assertLessEqual(len(raw), 128 * 1024)  # Runner 读取上限
+        payload = json.dumps(self.declaration, ensure_ascii=False).encode("utf-8")
+        self.assertLessEqual(len(payload), 512 * 1024)  # Host 注册载荷上限
+
+
+class V11412WebuiApiRegistryTests(unittest.TestCase):
+    """v1.14.12：manifest 版本号与 11 个 WebUI 只读 API 的注册形态。"""
+
+    def test_manifest_version_is_1_14_12(self):
+        manifest = json.loads((Path(__file__).parents[1] / "_manifest.json").read_text(
+            encoding="utf-8-sig"))
+        self.assertEqual(manifest["version"], "1.14.12")
+
+    def test_webui_apis_are_registered_private_with_matching_names(self):
+        plugin = MaiLifePlugin()
+        components = {str(item.get("name") or ""): item for item in plugin.get_components()}
+        for name in WEBUI_API_NAMES:
+            component = components.get(name)
+            self.assertIsNotNone(component, f"{name} 未注册为组件")
+            self.assertEqual(component.get("type"), "API", name)
+            self.assertFalse((component.get("metadata") or {}).get("public"), name)
+            self.assertTrue(callable(getattr(plugin, name, None)), name)
+
+
+# ==========主动任务 reply 锚点修复==========
+
+
+def planner_task_messages(task_id: str, event_id: str) -> list[dict[str, object]]:
+    """构造带主动任务标记的 Planner messages 载荷（与 test_task_context 同源的最小形态）。"""
+    body = (f'<plugin_proactive_task id="{task_id}" plugin_id="maibot-community.mai-life">\n'
+            "插件请求你主动处理一轮聊天：mai_life_proactive\n"
+            f"附加信息：{json.dumps({'mai_life_event_id': event_id}, ensure_ascii=False)}\n"
+            "</plugin_proactive_task>")
+    return [{"role": "system", "content": "system"}, {"role": "user", "content": body}]
+
+
+class PlannerReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
+    """reply 锚点修复：msg_id 只认真实用户消息，proactive:xxx 任务编号绝不是 msg_id。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    async def _active_task(self) -> ActivePluginTask:
+        now = time.time()
+        registry = ActiveTaskRegistry()
+        marker = PluginTaskMarker(task_id=f"{HOST_TASK_PREFIX}9001", plugin_id=PLUGIN_ID, metadata={})
+        record = {"id": "event-1", "status": "pending", "expires_at": now + 120,
+                  "created_at": now, "opportunity_id": "op-1", "sent_at": 0}
+        task = await registry.activate("s1", marker, kind="proactive", record=record, now=now)
+        self.assertIsNotNone(task)
+        return task
+
+    async def _planner_plugin(self, session: str) -> tuple[MaiLifePlugin, str]:
+        """装配一个只到主动任务激活为止的插件（沿用 test_task_context 的最小装配）。"""
+        now = time.time(); user_id = "100099"; event_id = "event-anchor"
+        task_id = f"{HOST_TASK_PREFIX}9001"
+        await self.store.sync_users([UserProfile(user_id=user_id, role="owner")])
+        await self.store.set_user_stream(user_id, session)
+        await self.store.add_opportunity({"id": "op-anchor", "framework_id": "f", "topic": "便利店见闻",
+            "motive": "想分享", "weight": 0.8, "privacy": "normal", "expires_at": now + 300})
+        await self.store.consume_opportunity("op-anchor", user_id, now)
+        await self.store.add_proactive_pending(event_id, user_id, "op-anchor", session, now, now + 180)
+        config = MaiLifeSettings()
+        plugin = MaiLifePlugin(); plugin.set_plugin_config(config.model_dump(mode="python"))
+        plugin._store = self.store; plugin._env = EnvironmentService(self.store, config, DummyLogger())
+        return plugin, task_id
+
+    async def test_instruction_quotes_real_message_id_and_rejects_task_number(self):
+        task = await self._active_task()
+        text = ActiveTaskRegistry.planner_instruction(task, "229855216")
+        # msg_id 指向目标会话最近一条真实用户消息。
+        self.assertIn("msg_id 设为 229855216", text)
+        self.assertIn("最近一条真实用户消息", text)
+        # 明确禁止把 proactive:xxx 任务编号当 msg_id：它不是消息 ID，宿主 reply 工具无法识别。
+        self.assertIn(task.task_id, text)
+        self.assertIn("不是消息 ID", text)
+        self.assertIn("不要把它当作 msg_id", text)
+        # 不再出现"设为该任务编号"的旧措辞。
+        self.assertNotIn("msg_id 设为该任务编号", text)
+        # 其余约束原样保留。
+        self.assertIn("一次任务最多产生一轮可见发送", text)
+        self.assertIn("发送后等待用户回应", text)
+        self.assertIn("不要自行解释或连续追发", text)
+        self.assertIn("插件仍会在本地按会话任务防重", text)
+
+    async def test_instruction_falls_back_to_task_number_without_message_id(self):
+        task = await self._active_task()
+        text = ActiveTaskRegistry.planner_instruction(task)
+        # 取不到真实消息（空会话）时退回旧措辞，仍以任务编号提示。
+        self.assertIn("msg_id 设为该任务编号", text)
+        self.assertNotIn("最近一条真实用户消息", text)
+        self.assertIn("一次任务最多产生一轮可见发送", text)
+        # 缺省参数与显式空串等价。
+        self.assertEqual(text, ActiveTaskRegistry.planner_instruction(task, ""))
+
+    async def test_on_planner_injects_recent_real_message_id(self):
+        session = "private-anchor"
+        plugin, task_id = await self._planner_plugin(session)
+        # 会话最近一条真实入站消息 ID（on_message_before 写入 _session_runtime）。
+        plugin._session_runtime[session] = {"user_id": "100099", "message_id": "229855216"}
+        result = await plugin.on_planner(session_id=session,
+                                         messages=planner_task_messages(task_id, "event-anchor"))
+        content = result["modified_kwargs"]["messages"][0]["content"]
+        self.assertIn("msg_id 设为 229855216", content)
+        self.assertIn("不要把它当作 msg_id", content)
+        self.assertNotIn("msg_id 设为该任务编号", content)
+
+    async def test_on_planner_without_runtime_keeps_legacy_wording(self):
+        session = "private-anchor-empty"
+        plugin, task_id = await self._planner_plugin(session)
+        # 空会话：_session_runtime 没有该 session，调用点取不到 message_id，退回旧措辞。
+        result = await plugin.on_planner(session_id=session,
+                                         messages=planner_task_messages(task_id, "event-anchor"))
+        content = result["modified_kwargs"]["messages"][0]["content"]
+        self.assertIn("msg_id 设为该任务编号", content)
+        self.assertNotIn("最近一条真实用户消息", content)
+
+
+class V11412WebuiRendererBindingTests(unittest.IsolatedAsyncioTestCase):
+    """v1.14.12 修复回归：按 dashboard 渲染器同规则校验 webui.json 全部绑定。
+
+    渲染器（dashboard/src/lib/plugin-webui.ts + plugin-webui-renderer.tsx）对以下情况
+    直接 throw，整页显示"插件返回的数据与组件声明不一致"：
+    query 引用缺 source 或途经 null/缺失字段；text/stat 绑到对象或数组；
+    table 非对象数组；chart 行缺数值 y 或标量 x。
+    真实渲染器规则（逐行对齐宿主源码）：scope=selection 未选中时返回 null 不抛错；
+    when 为 VisibilityCondition，不可见节点的 value 不解析；dialog 仅在打开时渲染；
+    repeat 提供 item 上下文。空库与种子库都必须零问题。
+    """
+
+    def _resolve(self, binding: Any, data: dict[str, Any], contexts: dict[str, Any] | None = None) -> Any:
+        if not isinstance(binding, dict):
+            return binding
+        contexts = contexts or {}
+        scope = binding.get("scope", "query")
+        if scope == "selection":
+            source = contexts.get("selection")
+            if not isinstance(source, dict) or binding["source"] not in source:
+                return None  # 渲染器：未选中行返回 null，不抛错
+        elif scope == "item":
+            source = contexts.get("item")
+        else:
+            source = data
+        if not isinstance(source, dict) or binding["source"] not in source:
+            raise AssertionError(f"missing source {binding['source']}")
+        value = source[binding["source"]]
+        for field in (binding.get("field") or "").split("."):
+            if value is None or not isinstance(value, dict) or field not in value:
+                raise AssertionError(f"missing {binding['source']}.{binding.get('field')}")
+            value = value[field]
+        return value
+
+    def _visible(self, node: dict[str, Any], data: dict[str, Any],
+                 contexts: dict[str, Any]) -> bool:
+        when = node.get("when")
+        if not when:
+            return True
+        value = self._resolve(when["reference"], data, contexts)
+        empty = (value is None or value == ""
+                 or (isinstance(value, list) and not value)
+                 or (isinstance(value, dict) and not value))
+        operator = when.get("operator", "not_empty")
+        if operator == "empty":
+            return empty
+        if operator == "not_empty":
+            return not empty
+        if operator == "equals":
+            return value == when.get("expected")
+        return bool(value)  # truthy
+
+    def _check_node(self, node: Any, data: dict[str, Any], page_id: str,
+                    contexts: dict[str, Any] | None = None) -> None:
+        if not isinstance(node, dict):
+            return
+        contexts = contexts or {}
+        label = node.get("label")
+        if not self._visible(node, data, contexts):
+            return
+        kind = node.get("type")
+        if kind == "dialog":
+            return  # 渲染器：仅在打开时渲染，静态检查跳过
+        if kind == "repeat":
+            rows = self._resolve(node["value"], data, contexts)
+            self.assertIsInstance(rows, list, f"{page_id}/{label} repeat 数据非数组")
+            name = str(node.get("name") or "")
+            for row in rows[:int(node.get("max_items") or 50)]:
+                item = dict(contexts.get("item") or {})
+                if name:
+                    item[name] = row
+                for child in node.get("children") or []:
+                    self._check_node(child, data, page_id, {**contexts, "item": item})
+            return
+        if "value" in node:
+            value = self._resolve(node["value"], data, contexts)
+            if kind in ("text", "stat"):
+                self.assertNotIsInstance(value, (dict, list), f"{page_id}/{label} 绑到非标量")
+            if kind == "table":
+                self.assertIsInstance(value, list, f"{page_id}/{label} 表数据非数组")
+                for row in value:
+                    self.assertIsInstance(row, dict, f"{page_id}/{label} 表行非对象")
+            if kind == "chart":
+                self.assertIsInstance(value, list, f"{page_id}/{label} 图数据非数组")
+                self.assertLessEqual(len(value), 2000, f"{page_id}/{label} 图超 2000 行")
+                for row in value:
+                    self.assertIsInstance(row, dict, f"{page_id}/{label} 图行非对象")
+                    y = row.get(node.get("y"))
+                    # 渲染器：y 必须是有限 number（布尔不算），x 必须是 string 或 number。
+                    self.assertIsInstance(y, (int, float), f"{page_id}/{label} y 非数值")
+                    self.assertNotIsInstance(y, bool, f"{page_id}/{label} y 不能是布尔")
+                    self.assertTrue(math.isfinite(y), f"{page_id}/{label} y 非有限数")
+                    self.assertIsInstance(row.get(node.get("x")), (str, int, float),
+                                          f"{page_id}/{label} x 非标量")
+                    self.assertNotIsInstance(row.get(node.get("x")), bool,
+                                             f"{page_id}/{label} x 不能是布尔")
+            if kind == "gallery":
+                self.assertIsInstance(value, list, f"{page_id}/{label} 画廊数据非数组")
+                self.assertLessEqual(len(value), 24, f"{page_id}/{label} 画廊超 24 项")
+                for row in value:
+                    self.assertIsInstance(row, dict, f"{page_id}/{label} 画廊项非对象")
+            if kind == "pagination":
+                self.assertIsInstance(value, dict, f"{page_id}/{label} 分页数据非对象")
+                self.assertIsInstance(value.get("page"), int, f"{page_id}/{label} page 非整数")
+                self.assertIsInstance(value.get("pages"), int, f"{page_id}/{label} pages 非整数")
+                self.assertIsInstance(value.get("total"), int, f"{page_id}/{label} total 非整数")
+        for child in node.get("children") or []:
+            self._check_node(child, data, page_id, contexts)
+
+    def _walk(self, page: dict[str, Any]):
+        pending = list(page.get("content") or [])
+        while pending:
+            node = pending.pop()
+            yield node
+            pending.extend(node.get("children") or [])
+
+    async def _collect_problems(self, seed: bool) -> list[str]:
+        tmp = tempfile.TemporaryDirectory()
+        store = LifeStore(tmp.name); await store.initialize()
+        try:
+            now = time.time()
+            if seed:
+                await store.sync_users([UserProfile(user_id="10001", role="owner")])
+                await store.set_user_stream("10001", "stream-10001")
+                await store.save_diary("2026-10-01", "标题", "内容", "平静", "digest", now - 3600)
+                await store.save_state_snapshot(now - 3600, await store.get_state())
+                # 覆盖七个页面的每张表与每个 dialog 的 selection 上下文：日程/社交/内心/
+                # 资讯/书架/用量至少一行真实数据，dialog 详情绑定才对真实行对象生效。
+                await store.add_dream("梦里在散步", 0.1, -0.2, now - 7200, ["片段一"], created_at=now - 3600)
+                await store.create_bookshelf_document({
+                    "id": "doc-1", "doc_type": "work", "work_type": "essay",
+                    "title": "随笔标题", "privacy": "public", "status": "archived",
+                    "source_kind": "life", "source_ref": "ref-1",
+                    "summary": "摘要", "created_at": now - 7200})
+                await store.add_bookshelf_revision("doc-1", "body", "正文内容", "fallback",
+                                                   now - 7200, status="archived")
+                await store.save_reading_note({
+                    "id": "note-1", "source_api": "reader", "external_id": "ext-1",
+                    "title": "阅读标题", "summary": "阅读摘要", "annotation": "批注",
+                    "source_digest": "digest", "created_at": now - 3600})
+                await store.add_important_date("10001", "考试", "2026-10-20", "annual", "chat", now)
+                await store.save_continuity("10001", "chat", ["话题一"], now)
+                await store.add_rest_backlog("10001", "睡前提到的电影", now - 1800)
+                await store.record_group_activity("group-1", "20002", "群友甲", now - 600)
+                await store.save_group_observation({
+                    "id": "obs-1", "group_id": "group-1", "group_alias": "测试群",
+                    "topic": "群话题", "summary": "群观察摘要", "interest_score": 0.6,
+                    "source_adapter": "mai", "created_at": now - 600, "expires_at": now + 3600,
+                    "source_message_ids": ["msg-1"]})
+                await store.record_recall_event(
+                    session_id="sess-1", recalled_message_id="msg-2", user_id="10001",
+                    operator_id="10001", group_id="", notice_type="recall",
+                    source_adapter="mai", summary="撤回摘要", media=["image"], now=now,
+                    expires_at=now + 3600)
+                await store.upsert_news_item({
+                    "id": "news-1", "source_id": "rss-tech", "title": "新闻标题",
+                    "url": "https://example.com/news/1", "summary": "新闻摘要",
+                    "content": "正文", "published_at": now - 600, "fetched_at": now,
+                    "content_hash": "hash-1", "expires_at": now + 6 * 3600})
+                await store.mark_news_associated("news-1", 0.6, "与生活相关", "opp-1", now)
+                await store.save_exploration_note({
+                    "id": "note-x", "topic": "话题", "query": "查询", "summary": "资料摘要",
+                    "source_urls": ["https://example.com/src/1"], "created_at": now - 600,
+                    "relevance_score": 0.6, "relevance_reason": "", "opportunity_id": "",
+                    "expires_at": now + 6 * 3600})
+                await store.record_search_history(
+                    created_at=now - 600, operation="tool_search", query="查询词",
+                    provider_type="bocha", success=True, result_count=3, error_class="",
+                    duration_ms=120.0, results=[], expires_at=now + 6 * 3600)
+                await store.record_llm_usage(
+                    created_at=now - 600, source="plugin", task_name="diary",
+                    model_name="planner", request_type="chat", prompt_tokens=50,
+                    completion_tokens=50, total_tokens=100, latency_ms=120.44, success=True)
+                await store.record_search_api_event(
+                    created_at=now - 600, operation="tool_search", provider_id="p1-bocha",
+                    provider_type="bocha", key_fingerprint="fp", success=True, status_code=200,
+                    latency_ms=80.44, result_count=4, error_class="")
+            plugin = await build_plugin(store, MaiLifeSettings(),
+                                        users=[UserProfile(user_id="10001", role="owner")] if seed else [])
+            ext = json.loads((Path(__file__).parents[1] / "webui.json").read_text(encoding="utf-8"))
+            problems: list[str] = []
+            for page in ext["pages"]:
+                data: dict[str, Any] = {}
+                for name, query in (page.get("queries") or {}).items():
+                    handler = getattr(plugin, str(query["api"]), None)
+                    self.assertIsNotNone(handler, f"{page['id']} 绑定不存在的 API {query['api']}")
+                    data[name] = await handler()
+                for node in page.get("content") or []:
+                    try:
+                        self._check_node(node, data, page["id"])
+                    except AssertionError as exc:
+                        problems.append(str(exc))
+                # dialog 详情树只在打开时渲染：用各行首行模拟 selection 上下文再校验一遍，
+                # 保证 detail 里的绑定对真实行对象可达（渲染器 selection = {选择名: 行}）。
+                selection: dict[str, Any] = {}
+                for node in self._walk(page):
+                    if node.get("type") != "table" or not node.get("selection"):
+                        continue
+                    try:
+                        rows = self._resolve(node["value"], data)
+                    except AssertionError:
+                        continue
+                    if isinstance(rows, list) and rows:
+                        selection[str(node["selection"])] = rows[0]
+                for node in page.get("content") or []:
+                    if not isinstance(node, dict) or node.get("type") != "dialog":
+                        continue
+                    for child in node.get("children") or []:
+                        try:
+                            self._check_node(child, data, page["id"], {"selection": selection})
+                        except AssertionError as exc:
+                            problems.append(str(exc))
+            return problems
+        finally:
+            await store.close(); tmp.cleanup()
+
+    async def test_empty_database_bindings_render_safe(self):
+        self.assertEqual(await self._collect_problems(seed=False), [])
+
+    async def test_seeded_database_bindings_render_safe(self):
+        self.assertEqual(await self._collect_problems(seed=True), [])
+
+
+# ==========v1.14.12 闸门生效日程类型==========
+
+
+class V11412GateSegmentTypeTests(unittest.IsolatedAsyncioTestCase):
+    """v1.14.12 修复：gate_segment_types 真正决定闸门生效（时间窗 OR 日程类型）。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LifeStore(self.tmp.name); await self.store.initialize()
+        self.config = MaiLifeSettings()
+        self.config.rest_gate.enabled = True
+        self.config.rest_gate.wake_probability = 0.0
+
+    async def asyncTearDown(self):
+        await self.store.close(); self.tmp.cleanup()
+
+    def _gate(self) -> RestGate:
+        return RestGate(self.store, self.config, DummyLLM(), DummyStateEngine(), DummyLogger())
+
+    async def test_listed_segment_type_gates_outside_windows(self):
+        """rest 进入生效列表后，15:00 的普通休息段也拦消息（修复前窗外一律放行）。"""
+        self.config.rest_gate.gate_segment_types = ["sleep", "nap", "rest"]
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 15, 0, tzinfo=TZ), {"kind": "rest"})
+        self.assertFalse(allowed); self.assertEqual(reason, "probability:0.00")
+
+    async def test_unlisted_segment_type_passes_outside_windows(self):
+        self.config.rest_gate.gate_segment_types = ["sleep", "nap"]
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 15, 0, tzinfo=TZ), {"kind": "leisure"})
+        self.assertTrue(allowed); self.assertEqual(reason, "outside_gate_window")
+
+    async def test_window_still_gates_regardless_of_segment_kind(self):
+        """P2-4 回归：默认框架的 leisure 段落在夜窗内，闸门照常生效。"""
+        self.config.rest_gate.gate_segment_types = ["sleep", "nap"]
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 22, 45, tzinfo=TZ), {"kind": "leisure"})
+        self.assertFalse(allowed); self.assertEqual(reason, "probability:0.00")
+
+    async def test_llm_prompt_kind_uses_matched_segment_type(self):
+        """命中配置类型时 LLM 提示词用该类型细化（麦麦正在 rest）。"""
+        class RecordingLLM(DummyLLM):
+            def __init__(self):
+                self.prompts: list[str] = []
+            def task_available(self, kind): return kind == "rest_wakeup"
+            async def generate_json(self, prompt, system, fallback=None, max_tokens=0, **kwargs):
+                self.prompts.append(str(prompt)); return {"score": 10, "should_reply": False}
+
+        self.config.rest_gate.mode = "llm"
+        self.config.rest_gate.llm_threshold = 99
+        self.config.rest_gate.gate_segment_types = ["rest"]
+        llm = RecordingLLM()
+        gate = RestGate(self.store, self.config, llm, DummyStateEngine(), DummyLogger())
+        allowed, reason = await gate.decide(
+            "1", "在吗", datetime(2026, 9, 21, 15, 0, tzinfo=TZ), {"kind": "rest"})
+        self.assertFalse(allowed)
+        self.assertIn("正在rest", llm.prompts[0])
+
+
 if __name__ == "__main__":
     unittest.main()
-
-

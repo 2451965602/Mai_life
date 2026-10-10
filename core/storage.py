@@ -680,6 +680,22 @@ class LifeStore:
             )
             self.conn.commit()
 
+    # 只读轨迹查询：WebUI 历史曲线按小时桶升序读取最近窗口，不做任何写入。
+    async def recent_state_snapshots(self, now: float, hours: int = 72) -> list[dict[str, Any]]:
+        """返回 [now-hours*3600, now] 内的状态快照，按 ts 升序；无数据返回空列表。
+
+        now 为环境时区对应的 epoch 秒；窗口上限收敛到 30 天，防止调用方误传放大查询。
+        """
+        span = max(1, min(24 * 30, int(hours))) * 3600
+        end = float(now)
+        async with self._lock:
+            rows = self.conn.execute(
+                """SELECT ts,energy,hunger,mood_valence,mood_arousal,sleep_phase
+                FROM state_snapshots WHERE ts>=? AND ts<=? ORDER BY ts ASC""",
+                (end - span, end),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     async def get_sleep_runtime(self) -> dict[str, Any]:
         async with self._lock:
             row = self.conn.execute("SELECT * FROM sleep_runtime WHERE id=1").fetchone()
@@ -1346,6 +1362,29 @@ class LifeStore:
             result=dict(row)
             try:result["media_types"]=json.loads(result.get("media_types") or "[]")
             except (TypeError,json.JSONDecodeError):result["media_types"]=[]
+            return result
+
+    # WebUI 跨会话读取最近私聊撤回摘要：网页查询不带会话身份，latest_recall_summary 无法复用。
+    async def recent_recall_summaries(self, now: float, limit: int = 5) -> list[dict[str, Any]]:
+        """返回最近的私聊撤回摘要（含媒介类型），按 created_at 倒序；无数据返回空列表。
+
+        与 latest_recall_summary 同范式：group_id='' 只取私聊、summary_expires_at 过滤有效期、
+        media_types 解析成 list；limit 收敛到 1-50，防止调用方误传放大查询。
+        """
+        bounded=max(1,min(50,int(limit)))
+        async with self._lock:
+            rows=self.conn.execute(
+                """SELECT session_id,user_id,summary,media_types,created_at FROM recall_events
+                WHERE group_id='' AND summary_expires_at>? AND (summary<>'' OR media_types<>'[]')
+                ORDER BY created_at DESC LIMIT ?""",
+                (float(now),bounded),
+            ).fetchall()
+            result=[]
+            for row in rows:
+                item=dict(row)
+                try:item["media_types"]=json.loads(item.get("media_types") or "[]")
+                except (TypeError,json.JSONDecodeError):item["media_types"]=[]
+                result.append(item)
             return result
 
     async def clear_recall_summaries(self) -> None:

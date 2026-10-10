@@ -12,7 +12,7 @@ import re
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import ValidationInfo, field_validator, model_validator
 
-PLUGIN_VERSION = "1.14.11"
+PLUGIN_VERSION = "1.14.12"
 CONFIG_SCHEMA_VERSION = "1.11.0"
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -767,8 +767,8 @@ class RestGateSettings(PluginConfigBase):
         default_factory=lambda: ["sleep", "nap"],
         description="哪些日程类型启用休息回复闸门。",
         json_schema_extra=_ui(
-            "闸门生效的日程类型", "建议保持“夜间睡眠 + 午休”。加入 rest 后，普通休息段也可能不回复。", 5,
-            label_en="Gated Schedule Types", hint_en="Recommended: sleep and nap. Adding rest also gates ordinary rest periods.",
+            "闸门生效的日程类型", "夜窗/午休窗内闸门一定生效；这里列出的日程类型在任意时间也会生效。加入 rest 后，普通休息段也可能不回复。", 5,
+            label_en="Gated Schedule Types", hint_en="Night/nap windows always gate; listed segment types gate at any time. Adding rest also gates ordinary rest periods.",
             enum_labels={"sleep": "夜间睡眠（sleep）", "nap": "午休小睡（nap）", "rest": "普通休息（rest）"},
         ),
     )

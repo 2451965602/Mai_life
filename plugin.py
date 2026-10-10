@@ -1,4 +1,4 @@
-"""Mai_life v1.14.11 插件入口。"""
+"""Mai_life v1.14.12 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -76,6 +76,86 @@ def _mood_label(value:float)->str:
     if value<0.25:return "平静"
     if value<0.6:return "不错"
     return "很好"
+
+
+def _relative_age(created_at:float,now:float)->str:
+    """把时间戳翻译成中文相对时长，供 WebUI 展示"多久之前"；非法时间戳显式降级。"""
+    if created_at<=0:return "未知"
+    delta=max(0.0,float(now)-float(created_at))
+    if delta<60:return "刚刚"
+    if delta<3600:return f"{int(delta//60)} 分钟前"
+    if delta<86400:return f"{int(delta//3600)} 小时前"
+    return f"{int(delta//86400)} 天前"
+
+
+def _switch(value:Any)->str:
+    """配置摘要把布尔统一翻成中文开关词，避免网页出现裸 True/False。"""
+    return "开启" if value else "关闭"
+
+
+def _onoff(value:Any)->str:
+    """管理摘要用更短的开/关词，表格与概览行里更紧凑。"""
+    return "开" if value else "关"
+
+
+def _time_in_window(start:str,end:str,current:str)->bool:
+    """HH:MM 时间窗判断，支持跨午夜；与睡前流程、休息闸门同一套语义。"""
+    if start==end:return False
+    return start<=current<end if start<end else current>=start or current<end
+
+
+def _countdown(days:int|None)->str:
+    """把倒计时天数翻译成中文；日期无效显式降级，不编造倒计时。"""
+    if days is None:return "日期无效"
+    if days<0:return f"已过 {-days} 天"
+    if days==0:return "就是今天"
+    if days==1:return "明天"
+    return f"{days} 天后"
+
+
+def _node_view(node:dict[str,Any])->dict[str,Any]:
+    """把日程节点压成网页视图：类型中译 + HH:MM 起止 + 窗口串。
+
+    空节点返回键齐全的空字典而非 null：WebUI 渲染器解析 null 嵌套路径会直接抛错，
+    整页显示"数据与组件声明不一致"。
+    """
+    if not node:return {"kind":"","kind_zh":"未知","summary":"","location":"","start":"","end":"","window":""}
+    start=hhmm(int(node.get("start_minute") or 0)); end=hhmm(int(node.get("end_minute") or 0))
+    kind=str(node.get("kind") or "")
+    return {"kind":kind,"kind_zh":_SCHEDULE_KIND_ZH.get(kind,kind or "未知"),
+            "summary":str(node.get("summary") or ""),"location":str(node.get("location") or ""),
+            "start":start,"end":end,"window":f"{start}-{end}"}
+
+
+# 睡眠相位集合：处于这些相位时才算"在休息"，休息类型才有意义。
+_SLEEPING_PHASES={"falling_asleep","light_sleep","deep_sleep","woken"}
+
+# WebUI 全文视图的分隔线：主人后台全量展示，多条全文拼接成一个大文本时分段用。
+_FULL_TEXT_SEP="\n\n────────────────────\n\n"
+
+
+def _search_results_digest(results:Any)->str:
+    """把搜索历史里的结果摘要列表拼成可读多行文本（WebUI 搜索历史表的结果列）。"""
+    if not isinstance(results,list):return ""
+    lines=[]
+    for item in results[:20]:
+        if not isinstance(item,dict):continue
+        title=str(item.get("title") or "").strip()
+        snippet=str(item.get("snippet") or "").strip()
+        url=str(item.get("url") or "").strip()
+        line=f"· {title}" if title else "· （无标题）"
+        if snippet:line+=f"：{snippet}"
+        if url:line+=f"（{url}）"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _hhmm_text(timestamp:Any,now:datetime)->str|None:
+    """时间戳格式化为 MM-DD HH:MM（WebUI 展示）；0 或无效时间返回 None（页面显示"—"）。"""
+    try:value=float(timestamp or 0)
+    except (TypeError,ValueError):return None
+    if value<=0:return None
+    return datetime.fromtimestamp(value,tz=now.tzinfo).strftime("%m-%d %H:%M")
 
 
 def _creation_result_text(result:dict[str,Any])->str:
@@ -1170,7 +1250,11 @@ class MaiLifePlugin(MaiBotPlugin):
                 self._neutralize_recalled_latest_payload(kwargs)
                 suffix+=("\n【撤回处理】用户已撤回本轮要回复的最后一条消息。该消息视为不存在，"
                          "不要调用 reply 或任何发送类工具，直接结束本轮思考即可。\n")
-        if active:suffix+=self._active_tasks.planner_instruction(active)
+        if active:
+            # reply 的 msg_id 必须引用会话最近一条真实用户消息：proactive:xxx 任务编号宿主 reply 工具
+            # 查不到（find_source_message_by_id 不认），报错还会被 to_display_message_id 哈希成乱码。
+            runtime=self._session_runtime.get(session) or {}
+            suffix+=self._active_tasks.planner_instruction(active,str(runtime.get("message_id") or ""))
         if active and active.kind=="relay" and self._relay and self.config.social.enabled:
             suffix+=await self._relay.prompt_context(session,active.task_id)
         # 麦麦绘图联动：对话/状态触发的生活分享引导（独立 suffix，不受 _clip(4000) 截断影响）。
@@ -1995,6 +2079,20 @@ class MaiLifePlugin(MaiBotPlugin):
         scene=context.get("scene") or {}; lines.append(f"\n当前细化场景：{scene.get('scene') or '尚未细化'}")
         return "\n".join(lines)
 
+    def _sleep_kind_zh(self,phase:str,segment:dict[str,Any],now:Any)->str:
+        """休息闸门的"类型"中译：夜间睡眠/午休/普通休息；未在休息时显式"清醒"。
+
+        与 RestGate.decide 同一套判定：日程 kind 命中 gate_segment_types 时用它细化，
+        否则按夜窗/午休窗推断（night→sleep、nap→nap）。
+        """
+        if phase not in _SLEEPING_PHASES:return "清醒"
+        gate=self.config.rest_gate; kind=str(segment.get("kind") or "")
+        if kind not in set(gate.gate_segment_types):
+            current=now.strftime("%H:%M")
+            kind="sleep" if _time_in_window(gate.night_start,gate.night_end,current) else (
+                "nap" if _time_in_window(gate.nap_start,gate.nap_end,current) else "rest")
+        return _SCHEDULE_KIND_ZH.get(kind,kind)
+
     async def _token_report(self)->str:
         if not self._store or not self._env:return "Token 统计尚未初始化。"
         now=self._env.now(); start=now.replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
@@ -2067,6 +2165,542 @@ class MaiLifePlugin(MaiBotPlugin):
         del kwargs
         if not self._admin or not self._env:return {"success":False,"error":"not_ready"}
         return {"success":True,"data":await self._admin.snapshot(scope,self._env.now(),limit)}
+
+    # ===== WebUI 只读数据源（v1.14.12）=====
+    # 十二个私有 @API 供声明式 WebUI 页面消费：纯本地聚合（无 LLM/网络调用，远低于 10 秒超时）、
+    # 响应键与契约逐字一致、列表与文本全部限量（远低于 512KiB 上限）、任何异常都回 {"success":False,"error":...}。
+    # 时间戳字段（*_at / *_until）一律给 epoch 秒，人读字段（*_age / window / countdown）一律给中文；
+    # WebUI 后台只有 MaiBot 主人可进，日记/梦境/关系/日期/Token 全部可以上网页，唯一例外是 Key 只出指纹。
+
+    @API(name="webui_status_overview",description="WebUI 概览：生活状态、日程定位、休息闸门运行时、撤回摘要与服务运行态",version="1",public=False)
+    async def webui_status_overview(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not self._ready:return {"success":False,"error":"not_ready"}
+            assert self._store and self._env and self._schedule and self._llm and self._debouncer and self._information and self._creation
+            now=self._env.now(); now_ts=now.timestamp()
+            state=await self._store.get_state(); weather=await self._store.get_weather() or {}
+            sleep=await self._store.get_sleep_runtime(); diaries=await self._store.list_diaries(1)
+            observations=await self._store.recent_group_observations(now_ts,100)
+            context=await self._schedule.context(now); snap=self._env.snapshot(now)
+            current=context.get("current") or {}; nxt=context.get("next") or {}; scene=context.get("scene") or {}
+            info=await self._information.status(now); creation=await self._creation.status(now)
+            mood=float(state.get("mood_valence") or 0); phase=str(state.get("sleep_phase") or "")
+            # 后台联网失败不能完全静默：带出最近一次失败分类，便于区分"没新闻"与"搜索挂了"。
+            last_failure=next((str(key.get("last_error_class") or "") for provider in info["providers"]
+                               for key in (provider.get("keys") or [])
+                               if str(key.get("last_error_class") or "")),"无")
+            # 叙事类任务（梦境/日记/创作正文）不可用时明确告知"占位内容"，避免用户以为功能缺陷。
+            narrative_note=("叙事任务无可用模型，梦境/日记/创作为占位内容"
+                            if any(not self._llm.task_available(name)
+                                   for name in ("dream","diary","creation_body")) else "")
+            profiles=self.config.users.profiles
+            recall_rows=await self._store.recent_recall_summaries(now_ts,5); latest=recall_rows[0] if recall_rows else None
+            return {
+                "generated_at":now.isoformat(timespec="seconds"),"bot_name":self._bot_name,"version":PLUGIN_VERSION,
+                "state":{"energy":round(float(state.get("energy") or 0),1),
+                         "hunger":round(float(state.get("hunger") or 0),1),
+                         "mood_valence":round(mood,1),
+                         "mood_arousal":round(float(state.get("mood_arousal") or 0),1),
+                         "mood_label":_mood_label(mood),
+                         "sleep_phase_zh":_SLEEP_PHASE_ZH.get(phase,phase or "未知"),
+                         "current_activity":str(state.get("current_activity") or ""),
+                         "current_location":str(state.get("current_location") or ""),
+                         "health_note":str(state.get("health_note") or "")},
+                "schedule":{"current":_node_view(current),
+                            "next":{"kind_zh":_SCHEDULE_KIND_ZH.get(str(nxt.get("kind") or ""),str(nxt.get("kind") or "") or "未知"),
+                                    "summary":str(nxt.get("summary") or ""),
+                                    "start":hhmm(int(nxt.get("start_minute") or 0))} if nxt else {"kind_zh":"","summary":"","start":""},
+                            "next_summary":str(nxt.get("summary") or ""),
+                            "scene":{"scene":str(scene.get("scene") or ""),
+                                     "applied":bool(scene.get("applied"))} if scene else {"scene":"","applied":False}},
+                "weather":EnvironmentService.weather_text(weather),
+                "day_type":str(snap.get("day_type") or ""),
+                "upcoming_festival":str(snap.get("upcoming_festival") or ""),
+                "sleep":{"phase_zh":_SLEEP_PHASE_ZH.get(str(sleep.get("phase") or ""),str(sleep.get("phase") or "") or "未知"),
+                         "kind_zh":self._sleep_kind_zh(str(sleep.get("phase") or ""),current,now),
+                         "grace_until":_hhmm_text(sleep.get("awake_grace_until"),now),
+                         "woken_count":int(sleep.get("woken_count") or 0),
+                         "last_event":str(sleep.get("last_event") or ""),
+                         "defer_until":_hhmm_text(sleep.get("sleep_defer_until"),now),
+                         "started_at":_hhmm_text(sleep.get("started_at"),now)},
+                "linkage":{"drawpic_enabled":bool(self.config.linkage.drawpic_enabled),
+                           "drawpic_detected":self._drawpic_loaded is True},
+                "services":{"llm_health":self._llm.health_error or "正常",
+                            "available_tasks":"、".join(sorted(self._llm.available_tasks)) or "无",
+                            "background_tasks":len(self._tasks),
+                            "active_bursts":self._debouncer.active_bursts,
+                            "active_groups":self._group_observer.active_groups if self._group_observer else 0,
+                            "users_summary":f"已配置 {len(profiles)} 个（启用 {sum(1 for p in profiles if p.enabled)} 个）",
+                            "diary_last_day":str(diaries[0]["day"]) if diaries else "",
+                            "narrative_note":narrative_note,
+                            "news_count":int(info.get("recent_news") or 0),
+                            "exploration_count":int(info.get("recent_explorations") or 0),
+                            "search_history_count":int(info.get("recent_search_history") or 0),
+                            "last_failure":last_failure,
+                            "group_observations":len(observations),
+                            "archived_today":int(creation.get("archived_today") or 0),
+                            "pending_inspirations":int(creation.get("pending_inspirations") or 0)},
+                # 撤回摘要跨会话读取：WebUI 查询不带会话身份，走 store.recent_recall_summaries。
+                "recall":{"enabled":_switch(self.config.recall.enabled),
+                          "cache_enabled":_switch(self.config.recall.cache_summary_enabled),
+                          "latest":{"user_id":str(latest.get("user_id") or ""),
+                                    "summary":str(latest.get("summary") or "")[:500],
+                                    "media_types":[str(item)[:40] for item in (latest.get("media_types") or [])][:10],
+                                    "age":_relative_age(float(latest.get("created_at") or 0),now_ts)} if latest else {"user_id":"","summary":"","media_types":[],"age":""}},
+            }
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_status_history",description="WebUI 曲线：最近 72 小时逐小时生活状态轨迹",version="1",public=False)
+    async def webui_status_history(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env
+            rows=await self._store.recent_state_snapshots(self._env.now().timestamp(),hours=72)
+            return {"points":[{"ts":float(row.get("ts") or 0),"energy":round(float(row.get("energy") or 0),1),
+                               "hunger":round(float(row.get("hunger") or 0),1),
+                               "mood_valence":round(float(row.get("mood_valence") or 0),1),
+                               "mood_arousal":round(float(row.get("mood_arousal") or 0),1),
+                               "sleep_phase":str(row.get("sleep_phase") or "")} for row in rows]}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_information_digest",description="WebUI 见闻：新闻/探索/搜索历史限量摘要 + 联网开关与计数",version="1",public=False)
+    async def webui_information_digest(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env and self._information):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env and self._information
+            now=self._env.now(); now_ts=now.timestamp(); info=await self._information.status(now)
+            # 主人后台全量展示：新闻出 URL 与正文全文，摘要按存储原样输出，不再截断。
+            news=[{"title":str(item.get("title") or "")[:160],"summary":str(item.get("summary") or ""),
+                   "url":str(item.get("url") or ""),
+                   "content":str(item.get("content") or ""),
+                   "age":_relative_age(float(item.get("published_at") or item.get("fetched_at") or 0),now_ts),
+                   "score":round(float(item.get("relevance_score") or 0),2)}
+                  for item in await self._store.recent_news_items(now_ts,limit=10)]
+            news_full_text=_FULL_TEXT_SEP.join(
+                f"【{item['title']}】\n来源：{item['url'] or '—'}｜{item['age']}｜关联分 {item['score']}\n\n"
+                f"{item['content'] or item['summary'] or '（无正文）'}"
+                for item in news) or "（暂无新闻）"
+            # 探索笔记：summary 存储侧本就保留 5000 字全量；source_urls 是数组，拼成顿号串供网页显示。
+            explorations=[{"topic":str(item.get("topic") or "")[:160],"query":str(item.get("query") or ""),
+                           "summary":str(item.get("summary") or ""),
+                           "sources_text":"、".join(str(u) for u in (item.get("source_urls") or [])[:10]),
+                           "age":_relative_age(float(item.get("created_at") or 0),now_ts),
+                           "score":round(float(item.get("relevance_score") or 0),2)}
+                          for item in await self._store.recent_exploration_notes(now_ts,limit=10)]
+            explorations_full_text=_FULL_TEXT_SEP.join(
+                f"【{item['topic']}】\n查询词：{item['query'] or '—'}｜{item['age']}｜关联分 {item['score']}\n"
+                f"来源：{item['sources_text'] or '—'}\n\n{item['summary'] or '（无笔记）'}"
+                for item in explorations) or "（暂无探索笔记）"
+            # 搜索历史：查询词不截断，补错误类型与结果摘要（results JSON 解析为多行文本）。
+            searches=[{"time":datetime.fromtimestamp(float(item.get("created_at") or 0),tz=now.tzinfo).strftime("%m-%d %H:%M"),
+                       "operation":str(item.get("operation") or ""),
+                       "query":str(item.get("query") or ""),
+                       "provider_type":str(item.get("provider_type") or ""),
+                       "success":bool(item.get("success")),
+                       "result_count":int(item.get("result_count") or 0),
+                       "error_class":str(item.get("error_class") or ""),
+                       "results_digest":_search_results_digest(item.get("results") or []),
+                       "duration_ms":round(float(item.get("duration_ms") or 0),1)}
+                      for item in await self._store.recent_search_history(now_ts,limit=20)]
+            # status 只回开关与计数；providers（含 Key 健康）由 webui_admin_summary 的来源 scope 提供。
+            return {"status":{"information_enabled":_switch(info.get("enabled")),
+                              "news_enabled":_switch(info.get("news_enabled")),
+                              "search_enabled":_switch(info.get("search_enabled")),
+                              "sources":int(info.get("sources") or 0),
+                              "recent_news":int(info.get("recent_news") or 0),
+                              "recent_explorations":int(info.get("recent_explorations") or 0),
+                              "recent_search_history":int(info.get("recent_search_history") or 0)},
+                    "news":news,"news_full_text":news_full_text,
+                    "explorations":explorations,"explorations_full_text":explorations_full_text,
+                    "search_history":searches}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_bookshelf_overview",description="WebUI 书柜：文档列表、创作状态、创作运行与最新作品摘录",version="1",public=False)
+    async def webui_bookshelf_overview(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env and self._creation):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env and self._creation
+            now=self._env.now(); now_ts=now.timestamp()
+            counts=await self._store.management_overview_counts()
+            rows=await self._store.list_bookshelf_documents(allow_private=True,limit=20)
+            # 运行明细取 50：与宿主 table 每页 50 行一致，counts.creation_runs 因此等于可见条数。
+            runs=await self._store.management_creation_runs(limit=50)
+            creation=await self._creation.status(now)
+            # 主人专属网页：私人日记与阅读批注同样可见；正文全量输出（revisions 已 JOIN 出 content）。
+            latest=next((row for row in rows if str(row.get("content") or "").strip()),None)
+            books=[{"doc_type":str(row.get("doc_type") or ""),"title":str(row.get("title") or "")[:160],
+                    "privacy":str(row.get("privacy") or ""),"status":str(row.get("status") or ""),
+                    "updated_age":_relative_age(float(row.get("updated_at") or 0),now_ts),
+                    "summary":str(row.get("summary") or ""),
+                    "content":str(row.get("content") or "")} for row in rows]
+            books_full_text=_FULL_TEXT_SEP.join(
+                f"【{row['title']}】（{row['doc_type'] or '—'}｜{row['privacy'] or '—'}｜{row['status'] or '—'}｜"
+                f"更新于 {row['updated_age']}）\n\n{row['content'] or '（无正文）'}"
+                for row in books) or "（书柜暂无作品）"
+            return {"counts":{"documents":int(counts.get("bookshelf_documents") or 0),
+                              "private_documents":int(counts.get("private_documents") or 0),
+                              "creation_runs":len(runs)},
+                    "creation":{"enabled":bool(creation.get("enabled")),
+                                "plaintext_acknowledged":bool(creation.get("plaintext_acknowledged")),
+                                "archived_today":int(creation.get("archived_today") or 0),
+                                "pending_inspirations":int(creation.get("pending_inspirations") or 0),
+                                "daily_max":int(self.config.creation.daily_max)},
+                    "books":books,
+                    "books_full_text":books_full_text,
+                    "runs":[{"document_id":str(row.get("document_id") or ""),"title":str(row.get("title") or "")[:160],
+                             "status":str(row.get("status") or ""),"started_at":float(row.get("started_at") or 0)}
+                            for row in runs],
+                    "latest_work":{"title":str(latest.get("title") or ""),"privacy":str(latest.get("privacy") or ""),
+                                   "content":str(latest.get("content") or "")} if latest else {"title":"","privacy":"","content":""}}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_schedule",description="WebUI 日程：今日生活框架时间线、当前/下一节点、当前场景与明日预览",version="1",public=False)
+    async def webui_schedule(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env and self._schedule):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env and self._schedule
+            now=self._env.now(); day=now.date().isoformat()
+            nodes=await self._store.get_framework(day)
+            # 场景按 framework_id 关联：同一 start_minute 的多个节点若按位置合并会互相覆盖。
+            scenes=await self._store.get_scenes_by_framework_ids([str(node.get("id") or "") for node in nodes])
+            context=await self._schedule.context(now); scene=context.get("scene") or {}
+            tomorrow=(now+timedelta(days=1)).date().isoformat()
+            return {"day":day,"generated_at":now.isoformat(timespec="seconds"),
+                    "current":_node_view(context.get("current") or {}),
+                    "next":{"kind_zh":_SCHEDULE_KIND_ZH.get(str(nxt.get("kind") or ""),str(nxt.get("kind") or "") or "未知"),
+                            "summary":str(nxt.get("summary") or ""),
+                            "start":hhmm(int(nxt.get("start_minute") or 0))}
+                           if (nxt:=context.get("next") or {}) else {"kind_zh":"","summary":"","start":""},
+                    "scene":{"scene":str(scene.get("scene") or ""),
+                             "applied":bool(scene.get("applied"))} if scene else {"scene":"","applied":False},
+                    "nodes":[{"start":hhmm(int(node.get("start_minute") or 0)),
+                              "end":hhmm(int(node.get("end_minute") or 0)),
+                              "kind_zh":_SCHEDULE_KIND_ZH.get(str(node.get("kind") or ""),str(node.get("kind") or "") or "未知"),
+                              "summary":str(node.get("summary") or ""),
+                              "location":str(node.get("location") or ""),
+                              "scene":str((scenes.get(str(node.get("id") or "")) or {}).get("scene") or ""),
+                              "energy_load":round(float(node.get("energy_load") or 0),1),
+                              "shareability":round(float(node.get("shareability") or 0),2)}
+                             for node in nodes],
+                    "tomorrow":{"day":tomorrow,
+                                "nodes":[{"start":hhmm(int(node.get("start_minute") or 0)),
+                                          "end":hhmm(int(node.get("end_minute") or 0)),
+                                          "kind_zh":_SCHEDULE_KIND_ZH.get(str(node.get("kind") or ""),str(node.get("kind") or "") or "未知"),
+                                          "summary":str(node.get("summary") or ""),
+                                          "location":str(node.get("location") or "")}
+                                         for node in await self._store.get_framework(tomorrow)]}}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_users",description="WebUI 用户关系：全量用户温度/阶段/角色/主动额度与最近互动",version="1",public=False)
+    async def webui_users(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env
+            now_ts=self._env.now().timestamp()
+            # 网页侧展示全部用户而非仅当前用户：禁用用户的关系与额度同样要能诊断。
+            rows=await self._store.list_users(include_disabled=True)
+            rows.sort(key=lambda item:(-float(item.get("last_user_message_at") or 0),str(item.get("user_id") or "")))
+            users=[]
+            for row in rows[:50]:
+                recent=await self._store.recent_interactions(str(row.get("user_id") or ""),limit=1)
+                temperature=float(row.get("temperature") or 0)
+                users.append({"user_id":str(row.get("user_id") or ""),
+                              "display_name":str(row.get("display_name") or ""),
+                              "role":str(row.get("role") or "friend"),
+                              "enabled":bool(row.get("enabled")),
+                              "temperature":round(temperature,1),
+                              "stage":relationship_stage(temperature),
+                              "proactive_enabled":bool(row.get("proactive_enabled")),
+                              "proactive_count":int(row.get("proactive_count") or 0),
+                              "daily_proactive_max":int(row.get("daily_proactive_max") or 0),
+                              "last_message_age":_relative_age(float(row.get("last_user_message_at") or 0),now_ts),
+                              "last_proactive_age":_relative_age(float(row.get("last_proactive_at") or 0),now_ts),
+                              "last_relation_day":str(row.get("last_relation_day") or ""),
+                              "recent":" ".join(str(recent[-1] if recent else "").split())[:60]})
+            return {"counts":{"total":len(rows),"enabled":sum(1 for row in rows if row.get("enabled")),
+                              "disabled":sum(1 for row in rows if not row.get("enabled")),
+                              "owners":sum(1 for row in rows if str(row.get("role") or "")=="owner"),
+                              "proactive_enabled":sum(1 for row in rows if row.get("enabled") and row.get("proactive_enabled"))},
+                    "users":users}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_memories",description="WebUI 生活记忆：近期日记列表、最新日记正文摘录与近期梦境碎片",version="1",public=False)
+    async def webui_memories(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env
+            now=self._env.now(); now_ts=now.timestamp()
+            # 主人后台全量展示：日记 20 篇且每篇带正文全文，另拼 diaries_full_text 供全文 tab 整段阅读。
+            diaries=await self._store.list_diaries(limit=20)
+            runtime=await self._store.memory_runtime()
+            latest_dream=await self._store.latest_dream()
+            dreams=await self._store.dreams_between(now_ts-30*86400,now_ts)
+            diary_views=[{"day":str(item.get("day") or ""),"title":str(item.get("title") or "")[:160],
+                          "mood_summary":str(item.get("mood_summary") or ""),
+                          "content":str(item.get("content") or "")} for item in diaries]
+            diaries_full_text=_FULL_TEXT_SEP.join(
+                f"【{item['day']}】{item['title']}\n心情：{item['mood_summary'] or '—'}\n\n"
+                f"{item['content'] or '（无正文）'}"
+                for item in diary_views) or "（暂无日记）"
+            return {"generated_at":now.isoformat(timespec="seconds"),
+                    "last_diary_day":str(runtime.get("last_diary_day") or (diaries[0]["day"] if diaries else "")),
+                    "diary_count":len(diaries),"dream_count":len(dreams),
+                    "latest_diary":{"day":str(diaries[0].get("day") or ""),
+                                    "title":str(diaries[0].get("title") or "")[:160],
+                                    "content":str(diaries[0].get("content") or ""),
+                                    "mood_summary":str(diaries[0].get("mood_summary") or "")} if diaries else {"day":"","title":"","content":"","mood_summary":""},
+                    "diaries":diary_views,
+                    "diaries_full_text":diaries_full_text,
+                    "latest_dream":{"created_at":float(latest_dream.get("created_at") or 0),
+                                    "content":str(latest_dream.get("content") or ""),
+                                    "mood_delta":round(float(latest_dream.get("mood_delta") or 0),2),
+                                    "energy_delta":round(float(latest_dream.get("energy_delta") or 0),2),
+                                    "fragments":[str(item) for item in (latest_dream.get("fragments") or [])][:10]}
+                                   if latest_dream else {"created_at":0,"content":"","mood_delta":0,"energy_delta":0,"fragments":[]},
+                    # dreams_between 按 created_at 升序，取末尾 20 条即最近 20 条。
+                    "dreams":[{"created_at":float(item.get("created_at") or 0),
+                               "content":str(item.get("content") or ""),
+                               "mood_delta":round(float(item.get("mood_delta") or 0),2),
+                               "energy_delta":round(float(item.get("energy_delta") or 0),2)}
+                              for item in dreams[-20:]]}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_dates",description="WebUI 重要日期：正式日期（含年度周期下次发生与倒计时）与待确认候选",version="1",public=False)
+    async def webui_dates(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env
+            now=self._env.now(); today=now.date()
+            names={str(user.get("user_id") or ""):str(user.get("display_name") or "") or "未读取昵称"
+                   for user in await self._store.list_users(include_disabled=True)}
+            entries=[]
+            for row in await self._store.list_important_dates():
+                occurrence=MemoryService.occurrence(row,today)
+                days_left=(occurrence-today).days if occurrence else None
+                user_id=str(row.get("user_id") or "")
+                entries.append({"id":int(row.get("id") or 0),"user_id":user_id,
+                                "user_name":names.get(user_id,"未读取昵称"),
+                                "event_name":str(row.get("event_name") or "")[:120],
+                                "event_date":str(row.get("event_date") or ""),
+                                "recurrence":str(row.get("recurrence") or "none"),
+                                "occurrence":occurrence.isoformat() if occurrence else "",
+                                "countdown":_countdown(days_left),
+                                "days_left":days_left if days_left is not None else -1})
+            # 按下次发生升序：年度周期条目排到未来那次，无效日期沉到最后。
+            entries.sort(key=lambda item:(item["days_left"]<0,item["days_left"],item["id"]))
+            candidates=[{"id":int(item.get("id") or 0),"user_id":str(item.get("user_id") or ""),
+                         "user_name":names.get(str(item.get("user_id") or ""),"未读取昵称"),
+                         "event_name":str(item.get("event_name") or "")[:120],
+                         "date_text":str(item.get("date_text") or "")[:120],
+                         "suggested_date":str(item.get("suggested_date") or ""),
+                         "confidence":round(float(item.get("confidence") or 0),2),
+                         "created_at":float(item.get("created_at") or 0)}
+                        for item in await self._store.management_date_candidates(limit=20)]
+            return {"counts":{"dates":len(entries),"candidates":len(candidates),
+                              "within_30d":sum(1 for item in entries if 0<=item["days_left"]<=30)},
+                    "dates":entries[:50],"candidates":candidates}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_usage",description="WebUI Token 统计：今日按来源/任务聚合 + 今日搜索 API + 近 7 日序列",version="1",public=False)
+    async def webui_usage(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._store and self._env):return {"success":False,"error":"not_ready"}
+            assert self._store and self._env
+            now=self._env.now(); start=now.replace(hour=0,minute=0,second=0,microsecond=0)
+            tokens=[{"label":f"{row['source']}/{row['task_name']}","source":str(row.get("source") or ""),
+                     "task_name":str(row.get("task_name") or ""),"calls":int(row.get("calls") or 0),
+                     "successes":int(row.get("successes") or 0),
+                     "prompt_tokens":int(row.get("prompt_tokens") or 0),
+                     "completion_tokens":int(row.get("completion_tokens") or 0),
+                     "total_tokens":int(row.get("total_tokens") or 0),
+                     "avg_latency_ms":round(float(row.get("avg_latency_ms") or 0),1)}
+                    for row in await self._store.usage_summary(start.timestamp())]
+            searches=[{"provider_type":str(row.get("provider_type") or ""),"calls":int(row.get("calls") or 0),
+                       "successes":int(row.get("successes") or 0),"results":int(row.get("results") or 0),
+                       "average_latency_ms":round(float(row.get("average_latency_ms") or 0),1),
+                       "last_at":float(row.get("last_at") or 0)}
+                      for row in await self._store.search_api_summary(start.timestamp())]
+            # 近 7 日：usage_summary(since) 是"从 since 起到现在"的累计值，逐日 0 点差分得单日用量；
+            # 明细保留期外的历史日累计回落，负值钳 0。末端边界取"明天 0 点"（其后无事件，累计天然为 0）。
+            boundaries=[]
+            for offset in range(6,-1,-1):
+                day=(start-timedelta(days=offset)).date().isoformat()
+                rows=await self._store.usage_summary((start-timedelta(days=offset)).timestamp())
+                boundaries.append((day,sum(int(row.get("total_tokens") or 0) for row in rows),
+                                   sum(int(row.get("calls") or 0) for row in rows)))
+            tail=await self._store.usage_summary((start+timedelta(days=1)).timestamp())
+            boundaries.append(("",sum(int(row.get("total_tokens") or 0) for row in tail),
+                               sum(int(row.get("calls") or 0) for row in tail)))
+            daily=[{"day":boundaries[index][0],"tokens":max(0,boundaries[index][1]-boundaries[index+1][1]),
+                    "calls":max(0,boundaries[index][2]-boundaries[index+1][2])} for index in range(7)]
+            return {"day":start.date().isoformat(),"generated_at":now.isoformat(timespec="seconds"),
+                    "totals":{"tokens_today":sum(int(item["total_tokens"]) for item in tokens),
+                              "calls_today":sum(int(item["calls"]) for item in tokens),
+                              "search_calls_today":sum(int(item["calls"]) for item in searches),
+                              "tokens_7d":sum(int(item["tokens"]) for item in daily),
+                              "calls_7d":sum(int(item["calls"]) for item in daily)},
+                    "tokens":tokens,"searches":searches,"daily":daily}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_config_summary",description="WebUI 配置摘要：各配置节开关与关键参数只读总览",version="1",public=False)
+    async def webui_config_summary(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not self._ready:return {"success":False,"error":"not_ready"}
+            cfg=self.config; profiles=cfg.users.profiles; gate=cfg.rest_gate
+            return {"plugin":{"enabled":_switch(cfg.plugin.enabled),"version":PLUGIN_VERSION},
+                    "users":{"configured":len(profiles),"enabled":sum(1 for item in profiles if item.enabled)},
+                    "models":{"fast_task":str(cfg.models.fast_task),"reasoning_task":str(cfg.models.reasoning_task)},
+                    "environment":{"timezone":str(cfg.environment.timezone),"city":str(cfg.environment.city),
+                                   "weather_refresh_minutes":int(cfg.environment.weather_refresh_minutes)},
+                    "linkage":{"drawpic_enabled":_switch(cfg.linkage.drawpic_enabled),
+                               "drawpic_detected":_switch(self._drawpic_loaded is True)},
+                    "debounce":{"private":_switch(cfg.debounce.enabled),"group":_switch(cfg.debounce.group_enabled)},
+                    "recall":{"enabled":_switch(cfg.recall.enabled),
+                              "cache_summary":_switch(cfg.recall.cache_summary_enabled),
+                              "summary_ttl_minutes":int(cfg.recall.summary_ttl_minutes),
+                              "summary_max_chars":int(cfg.recall.summary_max_chars)},
+                    "context":{"enabled":_switch(cfg.context.enabled),
+                               "continuity_enabled":_switch(cfg.context.continuity_enabled),
+                               "continuity_interval_minutes":int(cfg.context.continuity_interval_minutes),
+                               "prompt_max_chars":int(cfg.context.prompt_max_chars)},
+                    "rest_gate":{"enabled":_switch(gate.enabled),"mode":str(gate.mode),
+                                 "wake_probability":round(float(gate.wake_probability),2),
+                                 "llm_threshold":int(gate.llm_threshold),
+                                 "awake_grace_minutes":int(gate.awake_grace_minutes),
+                                 "silence_minutes":BEDTIME_SILENCE_MINUTES,
+                                 "night_window":f"{gate.night_start}-{gate.night_end}",
+                                 "nap_window":f"{gate.nap_start}-{gate.nap_end}",
+                                 "group_enabled":_switch(gate.group_enabled),"group_mode":str(gate.group_mode),
+                                 "group_night_window":f"{gate.group_night_start}-{gate.group_night_end}",
+                                 "group_nap_window":f"{gate.group_nap_start}-{gate.group_nap_end}"},
+                    "memory":{"enabled":_switch(cfg.memory.enabled),
+                              "dream_fragments_enabled":_switch(cfg.memory.dream_fragments_enabled),
+                              "dream_fragment_count":int(cfg.memory.dream_fragment_count),
+                              "diary_enabled":_switch(cfg.memory.diary_enabled),
+                              "diary_hour":int(cfg.memory.diary_hour),
+                              "diary_max_chars":int(cfg.memory.diary_max_chars),
+                              "important_dates_enabled":_switch(cfg.memory.important_dates_enabled),
+                              "date_model_analysis_enabled":_switch(cfg.memory.date_model_analysis_enabled),
+                              "date_candidate_retention_days":int(cfg.memory.date_candidate_retention_days),
+                              "date_reminder_lead_days":"、".join(str(int(item)) for item in cfg.memory.date_reminder_lead_days)},
+                    "information":{"enabled":_switch(cfg.information.enabled),
+                                   "association_enabled":_switch(cfg.information.association_enabled),
+                                   "association_threshold":round(float(cfg.information.association_threshold),2),
+                                   "proactive_share_enabled":_switch(cfg.information.proactive_share_enabled),
+                                   "context_item_limit":int(cfg.information.context_item_limit)},
+                    "news":{"enabled":_switch(cfg.news.enabled),"daily_max":int(cfg.news.daily_max),
+                            "full_text_count":int(cfg.news.full_text_count),
+                            "retention_days":int(cfg.news.retention_days)},
+                    "search":{"enabled":_switch(cfg.search.enabled),"daily_max":int(cfg.search.daily_max),
+                              "include_chat_topics":_switch(cfg.search.include_chat_topics),
+                              "note_retention_days":int(cfg.search.note_retention_days)},
+                    "search_api":{"tool_enabled":_switch(cfg.search_api.tool_enabled),
+                                  "history_enabled":_switch(cfg.search_api.history_enabled),
+                                  "history_retention_days":int(cfg.search_api.history_retention_days),
+                                  "timeout_seconds":round(float(cfg.search_api.timeout_seconds),1),
+                                  "max_attempts":int(cfg.search_api.max_attempts),
+                                  "max_results":int(cfg.search_api.max_results),
+                                  "provider_count":len(cfg.search_api.providers)},
+                    "social":{"enabled":_switch(cfg.social.enabled),
+                              "owner_group_to_private_enabled":_switch(cfg.social.owner_group_to_private_enabled),
+                              "inactivity_hours":round(float(cfg.social.inactivity_hours),1),
+                              "group_share_daily_max":int(cfg.social.group_share_daily_max),
+                              "group_share_min_interval_minutes":int(cfg.social.group_share_min_interval_minutes),
+                              "interesting_threshold":round(float(cfg.social.interesting_threshold),2),
+                              "summary_retention_hours":int(cfg.social.summary_retention_hours),
+                              "relay_pending_seconds":int(cfg.social.relay_pending_seconds),
+                              "groups":len(cfg.social.groups)},
+                    "creation":{"enabled":_switch(cfg.creation.enabled),
+                                "plaintext_storage_acknowledged":_switch(cfg.creation.plaintext_storage_acknowledged),
+                                "daily_max":int(cfg.creation.daily_max),
+                                "minimum_energy":int(cfg.creation.minimum_energy),
+                                "public_works_enabled":_switch(cfg.creation.public_works_enabled),
+                                "inspiration_lookback_days":int(cfg.creation.inspiration_lookback_days),
+                                "external_reading_enabled":_switch(cfg.creation.external_reading_enabled),
+                                "patrol_interval_minutes":int(cfg.creation.patrol_interval_minutes)},
+                    "schedule":{"generate_hour":int(cfg.schedule.generate_hour),
+                                "detail_lead_minutes":int(cfg.schedule.detail_lead_minutes),
+                                "template_file":str(cfg.schedule.template_file)},
+                    "proactive":{"enabled":_switch(cfg.proactive.enabled),
+                                 "patrol_interval_minutes":int(cfg.proactive.patrol_interval_minutes),
+                                 "min_interval_minutes":int(cfg.proactive.min_interval_minutes),
+                                 "recent_user_silence_minutes":int(cfg.proactive.recent_user_silence_minutes),
+                                 "pending_expire_seconds":int(cfg.proactive.pending_expire_seconds),
+                                 "max_retries_per_opportunity":int(cfg.proactive.max_retries_per_opportunity),
+                                 "minimum_energy":int(cfg.proactive.minimum_energy),
+                                 "score_threshold":round(float(cfg.proactive.score_threshold),2)},
+                    "usage":{"enabled":_switch(cfg.usage.enabled),"retention_days":int(cfg.usage.retention_days)}}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
+
+    @API(name="webui_admin_summary",description="WebUI 管理摘要：概览计数、QQ 群配置、主动候选与搜索来源健康",version="1",public=False)
+    async def webui_admin_summary(self,**kwargs:Any)->dict[str,Any]:
+        try:
+            if not (self._admin and self._store and self._env):return {"success":False,"error":"not_ready"}
+            assert self._admin and self._store and self._env
+            now=self._env.now()
+            overview=await self._admin.snapshot("overview",now)
+            sources=await self._admin.snapshot("sources",now); external=sources.get("external_reading") or {}
+            return {"overview":{"version":str(overview.get("version") or PLUGIN_VERSION),
+                                "users":int(overview.get("users") or 0),"owners":int(overview.get("owners") or 0),
+                                "pending_dates":int(overview.get("pending_dates") or 0),
+                                "pending_proactive":int(overview.get("pending_proactive") or 0),
+                                "bookshelf_documents":int(overview.get("bookshelf_documents") or 0),
+                                "private_documents":int(overview.get("private_documents") or 0),
+                                "token_calls_today":int(overview.get("token_calls_today") or 0),
+                                "token_total_today":int(overview.get("token_total_today") or 0),
+                                "search_calls_today":int(overview.get("search_calls_today") or 0),
+                                "social_enabled":_onoff(overview.get("social_enabled")),
+                                "creation_enabled":_onoff(overview.get("creation_enabled")),
+                                "network_enabled":_onoff(overview.get("network_enabled"))},
+                    "groups":[{"group_id":str(item.get("group_id") or ""),
+                               "group_name":str(item.get("group_name") or ""),
+                               "enabled":_onoff(item.get("enabled")),
+                               "observe_enabled":_onoff(item.get("observe_enabled")),
+                               "relay_target_enabled":_onoff(item.get("relay_target_enabled")),
+                               "stream_known":_onoff(item.get("stream_known"))}
+                              for item in (await self._admin.snapshot("groups",now)).get("items") or []],
+                    "proactive":{"candidates":[{"user_id":str(item.get("user_id") or ""),
+                                               "topic":str(item.get("topic") or "")[:160],
+                                               "status":str(item.get("status") or ""),
+                                               "created_at":float(item.get("created_at") or 0),
+                                               "expires_at":float(item.get("expires_at") or 0)}
+                                              for item in await self._store.management_proactive_candidates(limit=20)],
+                                 "skips":[{"reason":str(item.get("reason") or ""),
+                                           "total":int(item.get("total") or 0),
+                                           "users":int(item.get("users") or 0)}
+                                          for item in await self._store.proactive_skip_summary(str(now.date()),50)]},
+                    # endpoint/model 沿用 AdminService 的 _redact_keys 脱敏；Key 只出指纹与运行态，绝不出凭据。
+                    "sources":{"information_enabled":_onoff(sources.get("information_enabled")),
+                               "news_enabled":_onoff(sources.get("news_enabled")),
+                               "search_enabled":_onoff(sources.get("search_enabled")),
+                               "external_reading":{"enabled":_onoff(external.get("enabled")),
+                                                   "api_name":str(external.get("api_name") or "")},
+                               "providers":[{"provider_id":str(item.get("provider_id") or ""),
+                                             "provider_type":str(item.get("provider_type") or ""),
+                                             "enabled":_onoff(item.get("enabled")),
+                                             "key_count":int(item.get("key_count") or 0),
+                                             "endpoint":str(item.get("endpoint") or ""),
+                                             "model":str(item.get("model") or "")}
+                                            for item in sources.get("providers") or []],
+                               "keys":[{"provider_id":str(item.get("provider_id") or ""),
+                                        "fingerprint":str(item.get("key_fingerprint") or ""),
+                                        "status":str(item.get("status") or ""),
+                                        "cooldown_until":float(item.get("cooldown_until") or 0),
+                                        "failure_count":int(item.get("failure_count") or 0),
+                                        "last_error_class":str(item.get("last_error_class") or "")}
+                                       for item in await self._store.search_provider_health()]}}
+        except Exception as exc:
+            return {"success":False,"error":f"{type(exc).__name__}: {exc}"[:200]}
 
     @HomeCard(
         name="mai_life_management",title="麦生活管理",

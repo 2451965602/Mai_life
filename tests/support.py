@@ -63,7 +63,13 @@ class DummyLLM:
 
     所有服务的 generate_json 调用点都在 task_available 为真之后，
     因此该替身只用于把代码路径钉在本地兜底分支上。
+    available_tasks / health_error 与 LLMService 的公开属性同名，
+    供 WebUI 概览等服务运行态快照读取。
     """
+
+    def __init__(self):
+        self.available_tasks: set[str] = set()
+        self.health_error = ""
 
     def task_available(self, kind): return False
 

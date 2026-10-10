@@ -96,19 +96,21 @@ class RestGate:
         cfg=self.config.rest_gate
         if not cfg.enabled:return True,"disabled"
         if str(text or "").lstrip().startswith("/"):return True,"command"
-        # 时间窗优先：闸门只能由 night/nap 时间窗开启，窗内一律判眠；
-        # 日程 kind 只是细化提示，避免默认框架的 leisure/meal 段把闸门静默收窄。
+        # 时间窗与日程类型共同决定闸门是否生效（OR 语义）：
+        # 夜窗/午休窗内一定生效——避免默认框架的 leisure/meal 段把闸门静默收窄；
+        # gate_segment_types 列出额外生效的日程类型，这些类型在任意时间也触发闸门
+        # （配置文案承诺的"加入 rest 后普通休息段也可能不回复"由此落实）。
         current=now.strftime("%H:%M")
         night=self._in_window(cfg.night_start,cfg.night_end,current)
         nap=self._in_window(cfg.nap_start,cfg.nap_end,current)
-        if not (night or nap):return True,"outside_gate_window"
+        segment_kind=str((segment or {}).get("kind") or "")
+        kind_match=segment_kind in set(cfg.gate_segment_types)
+        if not (night or nap or kind_match):return True,"outside_gate_window"
+        # 命中配置类型时用它细化（LLM 提示词里的"正在做什么"），否则按窗推断。
+        kind=segment_kind if kind_match else ("sleep" if night else "nap")
         # 明确勿扰先于一切窗内分支：协商期/宽限期说"别烦我"同样要拦住（不入 backlog）。
         action,reason=self.boundary(text)
         if action=="block":return False,reason
-        # 窗内判眠：框架 kind 命中 gate_segment_types 时用它细化（如用户配置了 rest），
-        # 否则按窗推断（night→sleep，nap→nap）。
-        segment_kind=str((segment or {}).get("kind") or "")
-        kind=segment_kind if segment_kind in set(cfg.gate_segment_types) else ("sleep" if night else "nap")
         runtime=await self.store.get_sleep_runtime()
         # 睡前协商：入睡点被"最后一条私聊+静默"推后时她还没睡，正常回复不等判醒。
         # 到点道过晚安、静默满后 defer<=now，此处自然失效，当晚不再反复推迟。
