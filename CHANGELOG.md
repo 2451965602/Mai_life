@@ -1,5 +1,16 @@
 # 更新日志
 
+## [1.20.1] - 2026-10-12
+
+### 修复
+
+- 适配 WebUI 协议 v2：宿主/SDK 升级后 `schema_version: 1` 的声明被**整插件注册拒绝**（日志"WebUI 声明无效：协议已升级为 2"），插件完全无法加载。迁移内容：
+  - `schema_version` 1 → 2，新增 `required_capabilities: ["declarative_basic"]`；
+  - 核对 v2 移除项：本插件未使用被移除的 `repeat`/`gallery`/`upload` 组件与 `scope:"item"`，7 页声明其余部分（stack/card/grid/tabs/text/stat/table/chart/dialog + when/selection/detail）在 v2 全部合法，已用宿主真实 `load_webui_extension` 校验通过。
+- 新增**宿主真实 schema 校验测试**：自动探测本机 MaiBot 安装位置，用宿主的 `WebUIExtension` 校验 `webui.json`（探测不到则跳过）。已验证把声明改回 v1 会让该测试失败——下次协议再变可在重载插件前发现，不必等线上报错。
+- SDK 2.12.0 / dashboard 1.9.0 兼容性核对：插件用到的全部导入（API/Command/HomeCard/HookHandler/MaiBotPlugin/Tool/Field/PluginConfigBase 与 types）在 2.12.0 均存在；495 个测试在 SDK 2.8.2（开发）与 2.12.0（部署）双环境全绿。
+- `docs/webui-extension.md` 同步到协议 2：17 种组件白名单、移除项说明、progress/image 与 disabled_when、custom 页面与 required_capabilities、自检清单与设计师提示词。
+
 ## [1.20.0] - 2026-10-10
 
 ### 发布
