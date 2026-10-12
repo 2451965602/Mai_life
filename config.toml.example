@@ -221,6 +221,9 @@ creation_outline_task = ""
 creation_body_task = ""
 creation_review_task = ""
 reading_annotation_task = ""
+# 模型输出 token 上限；0=不限制，由服务商决定（推荐）。
+# 推理模型的思考链占用输出预算，写死小上限（如 300/900）会把正文挤成空响应。
+max_output_tokens = 0
 
 
 [usage]

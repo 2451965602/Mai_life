@@ -296,10 +296,24 @@ class ActiveTaskRegistry:
             return replace(item)
 
     @staticmethod
-    def planner_instruction(task: ActivePluginTask) -> str:
+    def planner_instruction(task: ActivePluginTask, recent_message_id: str = "") -> str:
+        """主动任务约束：有真实入站消息 ID 时只认它，任务编号绝不是 msg_id。
+
+        宿主 reply 内置工具的 find_source_message_by_id 查不到 proactive:xxx 任务编号，
+        且 to_display_message_id 会把锚点哈希成 7 位乱码，模型看不懂报错会反复重试，
+        因此必须显式禁止把任务编号当 msg_id；取不到真实消息（空会话）时才退回旧措辞。
+        """
+        if recent_message_id:
+            anchor=(f"当前主动任务编号是 {task.task_id}，它只是插件内部编号、不是消息 ID，"
+                    "宿主 reply 工具无法识别，不要把它当作 msg_id，用了会报无法理解的错误。"
+                    f"若决定调用 reply，请把 msg_id 设为 {recent_message_id}"
+                    "（这是目标会话最近一条真实用户消息），"
+                    "不要改为较早的用户消息或 Bot 自己刚发出的消息。")
+        else:
+            anchor=(f"当前主动任务编号是 {task.task_id}。若决定调用 reply，请优先把 msg_id 设为该任务编号，"
+                    "不要改为较早的用户消息或 Bot 自己刚发出的消息。")
         return (
             "\n【Mai_life 主动任务约束】\n"
-            f"当前主动任务编号是 {task.task_id}。若决定调用 reply，请优先把 msg_id 设为该任务编号，"
-            "不要改为较早的用户消息或 Bot 自己刚发出的消息。一次任务最多产生一轮可见发送；"
+            f"{anchor}一次任务最多产生一轮可见发送；"
             "发送后等待用户回应，不要自行解释或连续追发。插件仍会在本地按会话任务防重。\n"
         )

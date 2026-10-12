@@ -106,7 +106,7 @@ class MemoryService:
             "\"suggested_date\":\"YYYY-MM-DD或空\",\"confidence\":0到1,\"recurrence\":\"none或annual\"}。"
         )
         result=await self.llm.generate_json(
-            prompt,"你只做日期信息抽取，不回复用户。",{},max_tokens=320,
+            prompt,"你只做日期信息抽取，不回复用户。",{},max_tokens=0,
             task_kind="date_analysis",request_type="important_date_analysis",
         )
         if not isinstance(result,dict) or not result.get("has_date"):return
@@ -207,7 +207,7 @@ class MemoryService:
                 "互动数据只有数量，不能猜测聊天内容。返回JSON：title、content、mood_summary。\n"+serialized
             )
             raw=await self.llm.generate_json(
-                prompt,"你写克制、自然的私人日记，只输出合法JSON。",fallback,max_tokens=900,
+                prompt,"你写克制、自然的私人日记，只输出合法JSON。",fallback,max_tokens=0,
                 task_kind="diary",request_type="daily_diary",
             )
             if isinstance(raw,dict):result=raw

@@ -76,7 +76,7 @@ class NewsService:
                 "current_activity": current.get("summary") or "",
             }, ensure_ascii=False)
             + "\n只返回JSON：{\"query\":\"\"}。",
-            f"你自主决定{self.bot_name}此刻读什么新闻。", {"query": ""}, max_tokens=120,
+            f"你自主决定{self.bot_name}此刻读什么新闻。", {"query": ""}, max_tokens=0,
             task_kind="news", request_type="news_query_planning",
         )
         if not isinstance(result,dict):

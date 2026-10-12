@@ -32,3 +32,8 @@ HANDOVER.md
 
 # 运行时配置：由 Runner 按 config_model 生成、WebUI 维护；仓库只提交模板 config.toml.example
 /config.toml
+
+# WebUI 设计过程稿（设计师工作副本，勿入库）
+webui_head_tmp.json
+webui_v1_backup.json
+webui_v2.json
