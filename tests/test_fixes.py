@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import random
 import re
 import sqlite3
@@ -4302,32 +4303,34 @@ class V11412WebuiErrorPathTests(unittest.IsolatedAsyncioTestCase):
 class V11412WebuiJsonStructureTests(unittest.TestCase):
     """webui.json 声明结构：schema_version/workspace_title/页数/查询只绑已注册 API/组件白名单。
 
-    白名单对齐宿主真实 schema（MaiBot src/plugin_runtime/webui_schema.py 的 WebUINode：
-    19 种组件 + when/selection/detail 等属性），不是公开文档里的旧 13 种。
+    白名单对齐宿主真实 schema（MaiBot src/plugin_runtime/webui_schema.py 的 WebUINode，
+    协议 v2：17 种组件 + when/selection/detail/disabled_when）。v2 相对 v1 移除了
+    repeat/gallery/upload 组件与 scope:"item"，新增 progress/image 组件与 custom 页面。
     """
 
     COMMON_KEYS = {"type", "label", "when"}
+    INTERACTIVE_KEYS = {"disabled_when", "disabled_reason"}
     COMPONENT_KEYS = {
         "stack": {"children"},
-        "grid": {"children", "columns"},
         "card": {"children"},
+        "grid": {"children", "columns"},
         "tabs": {"children"},
-        "text": {"value"},
+        "collapsible": {"children", "default_open"},
+        "dialog": {"name", "children"},
+        "text": {"value", "format"},
         "stat": {"value"},
+        "progress": {"value"},
+        "image": {"value"},
         "table": {"value", "columns", "selection", "detail"},
         "chart": {"value", "chart_type", "x", "y"},
-        "input": {"name", "value"},
-        "date": {"name", "value"},
-        "select": {"name", "value", "options"},
-        "switch": {"name", "value"},
-        "button": {"action", "variant"},
-        "upload": {"action"},
-        "dialog": {"name", "children"},
-        "collapsible": {"children", "default_open"},
-        "repeat": {"value", "name", "children", "max_items"},
-        "gallery": {"value", "columns"},
         "pagination": {"value", "name"},
+        "input": {"name", "value"} | INTERACTIVE_KEYS,
+        "date": {"name", "value"} | INTERACTIVE_KEYS,
+        "select": {"name", "value", "options"} | INTERACTIVE_KEYS,
+        "switch": {"name", "value"} | INTERACTIVE_KEYS,
+        "button": {"action", "variant"} | INTERACTIVE_KEYS,
     }
+    REMOVED_COMPONENTS = {"repeat", "gallery", "upload"}
     FIELD_RE = re.compile(r"^(?:[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*)?$")
 
     def setUp(self):
@@ -4340,8 +4343,27 @@ class V11412WebuiJsonStructureTests(unittest.TestCase):
                 if str(item.get("type") or "") == "API"}
 
     def test_schema_version_and_workspace_title(self):
-        self.assertEqual(self.declaration.get("schema_version"), 1)
+        self.assertEqual(self.declaration.get("schema_version"), 2)
+        self.assertIn("declarative_basic", self.declaration.get("required_capabilities") or [])
         self.assertTrue(str(self.declaration.get("workspace_title") or ""))
+
+    def test_protocol_v2_removed_components_are_absent(self):
+        """v2 移除 repeat/gallery/upload 与 scope:"item"：混用会让宿主整插件注册失败。"""
+        used = set()
+        for page in self.declaration["pages"]:
+            stack = list(page.get("content") or [])
+            while stack:
+                node = stack.pop()
+                used.add(str(node.get("type") or ""))
+                stack.extend(node.get("children") or [])
+        self.assertEqual(used & self.REMOVED_COMPONENTS, set())
+        for page in self.declaration["pages"]:
+            stack = list(page.get("content") or [])
+            while stack:
+                node = stack.pop()
+                for reference in self._references(node):
+                    self.assertNotEqual(reference.get("scope"), "item")
+                stack.extend(node.get("children") or [])
 
     def test_pages_within_limits_and_unique_ids(self):
         pages = self.declaration.get("pages") or []
@@ -4399,7 +4421,7 @@ class V11412WebuiJsonStructureTests(unittest.TestCase):
                     self.assertEqual(set(value) - {"source", "field", "scope"}, set(),
                                      f"{kind} 的数据引用含协议外键: {sorted(value)}")
                     scope = value.get("scope", "query")
-                    self.assertIn(scope, {"query", "selection", "item"})
+                    self.assertIn(scope, {"query", "selection"})
                     if scope == "query":
                         self.assertIn(value["source"], queries,
                                       f"数据引用未声明查询: {value['source']}")
@@ -4428,7 +4450,7 @@ class V11412WebuiJsonStructureTests(unittest.TestCase):
                         self.assertTrue(child.get("label"), "tabs 子节点必须有 label")
                 if node.get("when") is not None:
                     reference = node["when"].get("reference") or {}
-                    self.assertIn(reference.get("scope", "query"), {"query", "selection", "item"})
+                    self.assertIn(reference.get("scope", "query"), {"query", "selection"})
                     if reference.get("scope", "query") == "query":
                         self.assertIn(reference.get("source"), queries,
                                       f"when 引用未声明查询: {reference.get('source')}")
@@ -4460,6 +4482,9 @@ class V11412WebuiJsonStructureTests(unittest.TestCase):
         when = node.get("when")
         if isinstance(when, dict) and isinstance(when.get("reference"), dict):
             refs.append(when["reference"])
+        disabled = node.get("disabled_when")
+        if isinstance(disabled, dict) and isinstance(disabled.get("reference"), dict):
+            refs.append(disabled["reference"])
         return refs
 
     def test_declaration_size_within_host_limits(self):
@@ -4593,9 +4618,9 @@ class V11412WebuiRendererBindingTests(unittest.IsolatedAsyncioTestCase):
     直接 throw，整页显示"插件返回的数据与组件声明不一致"：
     query 引用缺 source 或途经 null/缺失字段；text/stat 绑到对象或数组；
     table 非对象数组；chart 行缺数值 y 或标量 x。
-    真实渲染器规则（逐行对齐宿主源码）：scope=selection 未选中时返回 null 不抛错；
-    when 为 VisibilityCondition，不可见节点的 value 不解析；dialog 仅在打开时渲染；
-    repeat 提供 item 上下文。空库与种子库都必须零问题。
+    真实渲染器规则（逐行对齐宿主源码，协议 v2）：scope 仅 query/selection，
+    selection 未选中时返回 null 不抛错；when 为 VisibilityCondition，不可见节点的
+    value 不解析；dialog 仅在打开时渲染。空库与种子库都必须零问题。
     """
 
     def _resolve(self, binding: Any, data: dict[str, Any], contexts: dict[str, Any] | None = None) -> Any:
@@ -4607,8 +4632,6 @@ class V11412WebuiRendererBindingTests(unittest.IsolatedAsyncioTestCase):
             source = contexts.get("selection")
             if not isinstance(source, dict) or binding["source"] not in source:
                 return None  # 渲染器：未选中行返回 null，不抛错
-        elif scope == "item":
-            source = contexts.get("item")
         else:
             source = data
         if not isinstance(source, dict) or binding["source"] not in source:
@@ -4649,17 +4672,6 @@ class V11412WebuiRendererBindingTests(unittest.IsolatedAsyncioTestCase):
         kind = node.get("type")
         if kind == "dialog":
             return  # 渲染器：仅在打开时渲染，静态检查跳过
-        if kind == "repeat":
-            rows = self._resolve(node["value"], data, contexts)
-            self.assertIsInstance(rows, list, f"{page_id}/{label} repeat 数据非数组")
-            name = str(node.get("name") or "")
-            for row in rows[:int(node.get("max_items") or 50)]:
-                item = dict(contexts.get("item") or {})
-                if name:
-                    item[name] = row
-                for child in node.get("children") or []:
-                    self._check_node(child, data, page_id, {**contexts, "item": item})
-            return
         if "value" in node:
             value = self._resolve(node["value"], data, contexts)
             if kind in ("text", "stat"):
@@ -5103,6 +5115,54 @@ class V11414OutputBudgetTests(unittest.TestCase):
         result = asyncio.run(run())
         self.assertEqual(result["default"], "不限制")
         self.assertEqual(result["capped"], "640")
+
+
+# ==========v1.14.17 WebUI 协议 v2 迁移==========
+
+
+class V11417WebuiProtocolV2Tests(unittest.TestCase):
+    """v1.14.17：声明式 WebUI 协议升到 2，schema_version=1 会被宿主整插件注册拒绝。
+
+    v2 相对 v1：移除 repeat/gallery/upload 组件与 scope:"item"，新增 progress/image
+    组件、custom HTML 页面与 required_capabilities；text/stat 的 value 改为可选。
+    本测试尽量调用宿主真实 schema 校验（探测本机 MaiBot 安装位置），探测不到时跳过，
+    由上面的结构白名单测试承担常驻 guard。
+    """
+
+    def _host_root(self) -> Path | None:
+        candidates = []
+        env = os.environ.get("MAIBOT_HOST_DIR")
+        if env:
+            candidates.append(Path(env))
+        candidates.extend(sorted(Path.home().glob(
+            "AppData/Roaming/MaiBotOneKeyDesktop/*/modules/MaiBot")))
+        for literal in (Path("D:/MaiBot"), Path("C:/MaiBot")):
+            if literal.is_dir():
+                candidates.append(literal)
+        for candidate in candidates:
+            if (candidate / "src/plugin_runtime/webui_schema.py").is_file():
+                return candidate
+        return None
+
+    def test_declaration_passes_host_schema(self):
+        root = self._host_root()
+        if root is None:
+            self.skipTest("本机未探测到 MaiBot 宿主，跳过真实 schema 校验")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mai_host_webui_schema", root / "src/plugin_runtime/webui_schema.py")
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:  # 宿主依赖不完整（缺 pydantic 等）时跳过而非误报
+            self.skipTest(f"宿主 schema 加载失败: {exc}")
+        raw = (Path(__file__).parents[1] / "webui.json").read_bytes()
+        try:
+            extension = module.WebUIExtension.model_validate_json(raw.decode("utf-8-sig"))
+        except Exception as exc:
+            self.fail(f"webui.json 未通过宿主 schema: {exc}")
+        self.assertEqual(extension.schema_version, 2)
+        self.assertGreaterEqual(len(extension.pages), 1)
 
 
 if __name__ == "__main__":

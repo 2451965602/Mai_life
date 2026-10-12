@@ -2,7 +2,7 @@
 
 > 用途：让前端/设计同学在不读 MaiBot 源码的前提下，为 Mai_life 插件设计声明式 WebUI 页面；设计稿交回后由插件开发落成 `webui.json`。
 > 协议权威来源：MaiBot 仓库 `docs/plugin-webui.md` 与 `src/plugin_runtime/webui_schema.py`；本文档与其冲突时以源码为准。
-> **版本要求：主程序 ≥ 1.3.6（行详情弹窗/折叠/循环/条件显示/轮询自此引入），上传功能另需 SDK ≥ 2.11.0。**
+> **版本要求：WebUI 协议版本 2（`schema_version: 2`，2026-10 起的宿主；协议 1 的声明会被宿主**整插件注册拒绝**），插件开发侧 SDK ≥ 2.12.0。协议 2 相对 1 移除了 repeat/gallery/upload 组件与 `scope:"item"`，新增 progress/image 组件、custom HTML 页面与 `required_capabilities`。**
 
 ---
 
@@ -21,7 +21,8 @@
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "required_capabilities": ["declarative_basic"],
   "workspace_title": "麦生活",
   "pages": [
     {
@@ -43,39 +44,44 @@
 - 页面打开/刷新时**依次执行全部 queries**；操作成功后再次刷新 queries。
 - 输入字段（input/date/select/switch）的 `name` 页面内唯一；`actions` 的 `parameters` 从表单字段取值，类型 `string/integer/number/boolean`，支持 `required`、`max_length`(≤4000)、`minimum`、`maximum`、`choices`；`danger` 操作必须声明 `confirmation`。
 
-## 3. 组件规格（19 种，全部白名单；标注 ⭐ 为主程序 1.3.6 新增）
+## 3. 组件规格（协议 2 共 17 种，全部白名单）
 
 | 类型 | 属性 | 说明 |
 |---|---|---|
 | `stack` | `label`、`children` | 纵向排列 |
+| `card` | `label`、`children` | 宿主卡片（与 stack 同模型，仅默认样式不同） |
 | `grid` | `label`、`columns`(1-4)、`children` | 网格，移动端自动单列 |
-| `card` | `label`、`children` | 宿主卡片 |
 | `tabs` | `label`、`children` | 每个子节点必须有 `label` |
-| `text` | `label`、`value` | 纯文本；HTML 不执行；换行保留（whitespace-pre-wrap） |
-| `stat` | `label`、`value` | 统计大数字卡片 |
-| `table` | `label`、`value`、`columns`、`selection`⭐、`detail`⭐ | `columns=[{"field","label"}]`；绑定**对象数组**，每页 50 行；声明 `selection` 后点击/Enter/空格选中行，`detail` 同时打开具名弹窗 |
-| `dialog` ⭐ | `name`、`label`、`children` | 详情弹窗；**必须在 content 顶层声明**（防止被折叠/未激活 tab 隐藏），name 页内唯一，Escape/关闭按钮可关 |
-| `collapsible` ⭐ | `label`、`children`、`default_open` | 可展开区块，默认收起 |
-| `repeat` ⭐ | `name`、`value`、`children`、`max_items`(≤100) | 为数组每项重复子组件；`name` 定义循环项上下文；循环内禁止输入/弹窗/行选择；展开后整页 ≤1000 节点 |
-| `gallery` ⭐ | `label`、`value`、`columns` | 图片墙（≤24 个受限 data URL 缩略图） |
-| `pagination` ⭐ | `label`、`name`、`value` | 绑定 `{page,pages,total}`，搭配 `auto_refresh: true` 服务端分页 |
-| `chart` | `label`、`value`、`chart_type`(line/bar)、`x`、`y` | 绑定**对象数组**，x 为字符串/数字，y 为数字，≤2000 行 |
+| `collapsible` | `label`（必填）、`children`、`default_open` | 可展开区块，默认收起 |
+| `dialog` | `name`、`label`（必填）、`children` | 详情弹窗；**必须在 content 顶层声明**（防止被折叠/未激活 tab 隐藏），name 页内唯一，Escape/关闭按钮可关 |
+| `text` | `label`、`value`、`format`(plain/log) | 纯文本；HTML 不执行；换行保留（whitespace-pre-wrap）；`value` 可省略 |
+| `stat` | `label`、`value` | 统计大数字卡片；`value` 可省略 |
+| `progress` | `label`、`value` | 进度条；**value 必须是 0–100 的数字或数据引用**（适合精力/饥饿这类百分比） |
+| `image` | `label`、`value` | 图片；**value 必须是数据引用**，返回受限 data URL（JPEG/PNG/WebP，≤24000 字符） |
+| `table` | `label`、`value`、`columns`、`selection`、`detail` | `columns=[{"field","label"}]`；绑定**对象数组**，每页 50 行；声明 `selection` 后点击/Enter/空格选中行，`detail` 同时打开具名弹窗 |
+| `chart` | `label`、`value`、`chart_type`(line/bar，默认 line)、`x`、`y` | 绑定**对象数组**，x 为字符串/数字，y 为数字，≤2000 行 |
+| `pagination` | `label`、`name`、`value` | 绑定 `{page,pages,total}`，`name` 参与页面输入名唯一性；搭配 `auto_refresh: true` 服务端分页 |
 | `input` | `name`、`label`、`value` | 数字默认值→数字框，其余文本 |
 | `date` | `name`、`label`、`value` | 字符串日期 |
-| `select` | `name`、`label`、`value`、`options` | `options=[{"label","value"}]`，value 必须非空字符串 |
-| `switch` | `name`、`label`、`value` | value 必须布尔 |
-| `button` | `label`、`action`、`variant` | variant：primary/danger/muted |
-| `upload` ⭐ | `label`、`action` | 文件上传；需 `required_capabilities: ["file_upload_v1"]` 与 SDK ≥2.11.0 |
+| `select` | `name`、`label`、`value`、`options` | `options=[{"label","value"}]`，value 必须属于 options |
+| `switch` | `name`、`label`、`value` | value 必须布尔（默认 false） |
+| `button` | `label`（必填）、`action`、`variant` | variant：primary/danger/muted；danger 必须声明 confirmation |
 
-**数据绑定**：`value` 可以是标量（字面量），或 `{"source": "查询别名", "field": "a.b.c"}`。`field` 为空串 = 整个查询返回值。**table/chart/gallery/pagination/repeat 必须用数据引用**。不支持计算表达式、脚本、链接。
+**协议 2 已移除**：`repeat`（数组循环）、`gallery`（图片墙）、`upload`（声明式上传）、`scope:"item"`——混用任一都会让宿主**整插件注册失败**。数组循环的需求改由 custom 页面或后端拼装文本实现；图片用 `image` 组件（数据引用）；上传只存在于 custom 页面（`uploads` + `required_capabilities: ["image_upload"]`）。
 
-**数据上下文 scope（1.3.6 ⭐）**：数据引用支持可选 `scope`——默认 `"query"` 读查询结果；`"selection"` 读表格选中行（`source` 填该表的 `selection` 名）；`"item"` 读所在 `repeat` 的当前项（`source` 填循环 `name`）。无选中行时 selection 引用为 null（页面显示"—"）。
+**交互组件禁用态（协议 2 新增）**：input/date/select/switch/button 支持 `disabled_when`（VisibilityCondition）与 `disabled_reason`（Label），条件满足时禁用并展示原因。
 
-**条件显示 when（1.3.6 ⭐，全组件通用）**：`"when": {"reference": {...}, "operator": "truthy|empty|not_empty|equals", "expected": 标量}`——null/空串/空数组/空对象视为空，数字 0 不为空；首次查询完成前有条件区块不显示。**注意：tabs 的直接子节点加 when 时页签标签仍渲染（内容空），when 应加在 tab 内部的组件上。**
+**数据绑定**：`value` 可以是标量（字面量），或 `{"source": "查询别名", "field": "a.b.c"}`。`field` 为空串 = 整个查询返回值。**table/chart/pagination 必须用数据引用；progress 接受数字或数据引用；image 只接受数据引用**。不支持计算表达式、脚本、链接。
 
-**动态参数 arguments（1.3.6 ⭐，仅 actions）**：action 可用 `arguments` 把参数绑到数据上下文（如 `{"id": {"scope":"selection","source":"row","field":"id"}}`），逐字段覆盖同名表单参数，只映射已声明标量参数。查询刷新后选中行清除、详情弹窗关闭。
+**数据上下文 scope**：数据引用支持可选 `scope`——默认 `"query"` 读查询结果；`"selection"` 读表格选中行（`source` 填该表的 `selection` 名）。无选中行时 selection 引用为 null（页面显示"—"）。协议 2 已移除 `"item"`。
 
-**页面级轮询（1.3.6 ⭐）**：`poll_interval_seconds` 3–60 秒定时重跑 queries（0 关闭；操作忙碌时跳过；离开页面停止）；`auto_refresh` 供分页等表单参数变化时自动重查。
+**条件显示 when（全组件通用）**：`"when": {"reference": {...}, "operator": "truthy|empty|not_empty|equals", "expected": 标量}`——null/空串/空数组/空对象视为空，数字 0 不为空；首次查询完成前有条件区块不显示。**注意：tabs 的直接子节点加 when 时页签标签仍渲染（内容空），when 应加在 tab 内部的组件上。**
+
+**动态参数 arguments（仅 actions）**：action 可用 `arguments` 把参数绑到数据上下文（如 `{"id": {"scope":"selection","source":"row","field":"id"}}`），逐字段覆盖同名表单参数；**queries 不得声明 arguments 或 confirmation**。查询刷新后选中行清除、详情弹窗关闭。
+
+**页面级轮询**：`poll_interval_seconds` 3–60 秒定时重跑 queries（0 关闭；操作忙碌时跳过；离开页面停止）；`auto_refresh` 供分页等表单参数变化时自动重查。
+
+**custom 页面（协议 2 新增，Mai_life 当前未使用）**：`mode: "custom"` 的页面用 `entry` 指向插件内相对 HTML 文件（≤2 MiB，总量 ≤8 MiB），可配 `layout: document|viewport`、`uploads` 图片上传；需要 `required_capabilities: ["custom_pages"]`（上传另加 `image_upload`）。结构化参数（array/object）另需 `structured_arguments`。
 
 ## 4. 渲染器硬规则（踩坑篇，违反即整页报错）
 
@@ -87,7 +93,7 @@
 4. **chart**：数组 ≤2000 行；每行 `y` 必须是有限数字、`x` 必须是字符串或数字；**空数组合法**（显示空图）。
 5. 查询失败/API 下线会显示错误，**不使用伪造数据**——所以不要为了"好看"绑定不存在或未必存在的字段。
 6. **dialog 必须在 content 顶层**（depth=1），name 页内唯一；`table.detail` 必须与 `selection` 同时声明，selection 名页内唯一。
-7. **repeat 内禁止**输入组件、详情弹窗、行选择（防止复制表单/交互状态）；repeat 不能遮蔽外层循环名；展开后整页 ≤1000 节点，超出显示数据错误。
+7. **协议 2 没有 repeat**：需要"数组每项一组组件"时要么后端拼成文本用 text 展示，要么用 custom 页面自己渲染；不要写 repeat/gallery/upload/scope:"item"，写了宿主直接拒绝注册。
 8. 查询刷新成功后**选中行清除、详情弹窗关闭**——详情内操作（如删除）完成后数据会刷新，属预期行为。
 
 ## 5. 限制与上限
@@ -100,12 +106,12 @@
 | 每页嵌套层数 | 8 |
 | 每页 queries / actions | 10 / 20 |
 | 每绑定参数 | 30 个标量 |
-| repeat 每循环 / 展开后整页 | 100 项 / 1000 节点 |
+| custom 页面 HTML / 全部 HTML 总量 | 2 MiB / 8 MiB |
 | 轮询间隔 | 3–60 秒（0 关闭） |
 | 每插件并发 WebUI 请求 | 2 |
 | API 超时 | 10 秒 |
 | API 响应 | 512 KiB、12 层嵌套、20000 元素 |
-| table 分页 / chart 行数 / gallery | 50 行/页、2000 行、24 张 |
+| table 分页 / chart 行数 / image data URL | 50 行/页、2000 行、24000 字符 |
 
 无效声明或引用未注册 API → **插件本次注册整体失败**（日志有原因），所以字段名必须与后端契约逐字一致。
 
@@ -156,7 +162,7 @@ WebUIExtension.model_validate_json(open('webui.json', encoding='utf-8-sig').read
 1. **完整 `webui.json` 草案**（必须通过 `python -c "import json;json.load(open('webui.json'))"`）。
 2. **每页设计说明**：信息架构选择、取舍理由、与现状的差异点。
 3. **如需新数据**：明确列出需要的字段与结构（后端按第 4/6 节契约补齐；可空对象一律键齐全）。
-4. **自检清单**（交回前逐项过）：组件全在白名单 19 种；每个绑定字段在第 6 节契约中存在且类型匹配；scope=selection 的 source 是同页 table.selection 名、scope=item 的 source 是外层 repeat 名；table/chart 只绑数组；text/stat 不绑对象/数组；空数据场景（空库）不炸页；页数/组件数/查询数不超上限；dialog 在 content 顶层且 detail 指向已声明 dialog。
+4. **自检清单**（交回前逐项过）：组件全在白名单 17 种；schema_version=2 且声明了 required_capabilities；每个绑定字段在第 6 节契约中存在且类型匹配；scope=selection 的 source 是同页 table.selection 名；table/chart 只绑数组；text/stat 不绑对象/数组；progress 的 value 是 0–100；空数据场景（空库）不炸页；页数/组件数/查询数不超上限；dialog 在 content 顶层且 detail 指向已声明 dialog。
 
 ---
 
@@ -167,11 +173,11 @@ WebUIExtension.model_validate_json(open('webui.json', encoding='utf-8-sig').read
 
 【技术约束（必须遵守，违反会整页报错）】
 - 页面是声明式 JSON（webui.json），不能写 HTML/CSS/JS；宿主控制全部视觉，你只做信息架构与组件选型。
-- 组件仅 19 种：stack/grid/card/tabs/text/stat/table/chart/input/date/select/switch/button/dialog/collapsible/repeat/gallery/pagination/upload。
-- 数据绑定 value 只能是标量或 {"source":"查询别名","field":"a.b"}；table/chart/gallery/pagination/repeat 必须绑对象数组；text/stat 只能绑标量（绑对象/数组会炸页）。
+- 组件仅 17 种：stack/card/grid/tabs/collapsible/dialog/text/stat/progress/image/table/chart/pagination/input/date/select/switch/button。协议 2 已移除 repeat/gallery/upload 与 scope:"item"，写了宿主会整插件注册失败。
+- 数据绑定 value 只能是标量或 {"source":"查询别名","field":"a.b"}；table/chart/pagination 必须绑对象数组；image 只绑数据引用；progress 的 value 是 0–100；text/stat 只能绑标量（绑对象/数组会炸页）。
 - 绑定路径途经的每一层都必须存在：后端对"无数据"返回键齐全的空字典，你绑定空字典的键会得到 null（页面显示"—"），但绑定不存在的键名会整页报错。
 - chart：x 为字符串/数字、y 为有限数字、≤2000 行，空数组合法；table 每页 50 行。
-- 高级能力（按需使用）：when 条件显示（reference+operator，全组件通用）；table.selection+detail 行点击弹窗（dialog 必须声明在 content 顶层）；repeat 数组循环（name 定义项上下文，循环内禁输入/弹窗/行选择）；数据引用可选 scope（query 默认 / selection 选中行 / item 循环项）；poll_interval_seconds 3–60 秒轮询。
+- 高级能力（按需使用）：when 条件显示（reference+operator，全组件通用）；交互组件的 disabled_when+disabled_reason；table.selection+detail 行点击弹窗（dialog 必须声明在 content 顶层）；数据引用可选 scope（query 默认 / selection 选中行）；poll_interval_seconds 3–60 秒轮询。
 - 每插件 ≤20 页、每页 ≤200 组件（content 顶层 ≤50）、≤8 层嵌套、≤10 查询、≤20 操作；workspace 页必须写 workspace_title；icon 仅 puzzle/chart/settings/database/list。
 - 页面分 placement=workspace（插件顶部工作区，第一个是默认页）与 sidebar（插件扩展分组）。
 
