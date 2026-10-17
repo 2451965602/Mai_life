@@ -1741,8 +1741,21 @@ class LifeStore:
                 document_ids=[str(row[0]) for row in running if str(row[0] or "")]
                 if document_ids:
                     marks=",".join("?" for _ in document_ids)
-                    conn.execute(f"UPDATE bookshelf_documents SET status='failed',updated_at=? WHERE id IN ({marks})",
-                                 (now,*document_ids))
+                    # 已有 final 修订的文档书体完好（续写中被硬打断的旧书，或终稿落库后才被打断的新书），
+                    # 恢复 archived 让它继续留在书柜，且不刷新 updated_at/archived_at 白吃当日额度；
+                    # 只有什么都没留下的新书才标记 failed。
+                    conn.execute(
+                        f"""UPDATE bookshelf_documents SET status='archived'
+                        WHERE id IN ({marks})
+                        AND id IN (SELECT document_id FROM bookshelf_revisions WHERE stage='final')""",
+                        document_ids,
+                    )
+                    conn.execute(
+                        f"""UPDATE bookshelf_documents SET status='failed',updated_at=?
+                        WHERE id IN ({marks})
+                        AND id NOT IN (SELECT document_id FROM bookshelf_revisions WHERE stage='final')""",
+                        (now,*document_ids),
+                    )
                 conn.execute(
                     "UPDATE creation_runs SET status='interrupted',completed_at=?,error_summary='Runner interrupted' WHERE status='running'",
                     (now,),
@@ -1756,12 +1769,45 @@ class LifeStore:
             self.conn.commit()
 
     async def archived_work_count(self, start: float, end: float) -> int:
+        """当日归档章节数：每条 final 终稿修订算一章，同一本书当天续写多章也逐章计入每日额度。
+
+        不能按文档 archived_at 计数：续写只是把同一文档的 archived_at 刷新到当天，
+        同日的第二章起计数不再增长，continuation_min_gap_days=0 时每日上限会形同虚设。
+        每次成功归档（新书或续写）恰好落库一条 final 修订，按修订计数即"每章花一个额度"。
+        """
         async with self._lock:
             row=self.conn.execute(
-                """SELECT COUNT(*) FROM bookshelf_documents WHERE doc_type='work' AND status='archived'
-                AND archived_at>=? AND archived_at<?""",(start,end)
+                """SELECT COUNT(*) FROM bookshelf_revisions r
+                JOIN bookshelf_documents d ON d.id=r.document_id
+                WHERE d.doc_type='work' AND r.stage='final'
+                AND r.created_at>=? AND r.created_at<?""",(start,end)
             ).fetchone()
             return int(row[0]) if row else 0
+
+    async def continuable_works(self, work_types: list[str], *, stale_before: float, max_chapters: int,
+                                min_gap_before: float, limit: int = 50) -> list[dict[str, Any]]:
+        """书柜续写候选：只统计 final 修订的章节数与最近章节时间，等最久的书优先。
+
+        章节数上限、最小间隔与停滞判定全部下推 SQL，避免候选集被服务侧过滤饿死；
+        隐私守卫依赖当日灵感，由调用方过滤。
+        """
+        async with self._lock:
+            types=[str(item)[:40] for item in work_types if str(item)]
+            if not types:return []
+            marks=",".join("?" for _ in types)
+            rows=self.conn.execute(
+                f"""SELECT d.id,d.work_type,d.title,d.privacy,d.summary,d.created_at,
+                (SELECT COUNT(*) FROM bookshelf_revisions r WHERE r.document_id=d.id AND r.stage='final') AS chapters,
+                (SELECT COALESCE(MAX(r.created_at),0) FROM bookshelf_revisions r
+                 WHERE r.document_id=d.id AND r.stage='final') AS last_chapter_at
+                FROM bookshelf_documents d
+                WHERE d.doc_type='work' AND d.status='archived' AND d.work_type IN ({marks})
+                AND last_chapter_at>=? AND last_chapter_at<=? AND chapters<?
+                ORDER BY last_chapter_at ASC LIMIT ?""",
+                (*types,float(stale_before),float(min_gap_before),max(1,int(max_chapters)),
+                 max(1,min(200,int(limit)))),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     async def create_bookshelf_document(self, item: dict[str, Any]) -> bool:
         async with self._lock:

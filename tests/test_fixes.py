@@ -526,6 +526,16 @@ class CreationFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.config = MaiLifeSettings()
         self.config.creation.enabled = True
         self.config.creation.plaintext_storage_acknowledged = True
+        # 本类只测「开新书」兜底路径，显式关闭书柜续写（A5）：
+        # 续写默认开启后，同刻连 tick 也会先走 _select_continuation，当前通过依赖两个
+        # 巧合——continuation_min_gap_days 默认=1 用 SQL 挡住「同刻 last_chapter_at==now」
+        # 的候选，且无合格候选时不掷概率、不消耗随机流。一旦使用者把 min_gap_days 调成 0
+        # （合法取值 ge=0）或让用例跨日 tick，65% 概率续写会使标题数不足 5、形容词池断言
+        # 也随之漂移。continuation_enabled=False 在查候选与掷概率之前返回，随机流
+        # （random.seed(index) 后的标题池）对任何 continuation_* 配置都逐字节确定；
+        # 若改钉 probability=0.0，有合格候选时仍会先消耗一次 random.random()。续写行为
+        # 本身由 tests/test_creation.py 的专门用例覆盖。
+        self.config.creation.continuation_enabled = False
         self.now = datetime(2026, 7, 13, 16, 0, tzinfo=timezone(timedelta(hours=8)))
 
     async def asyncTearDown(self):
@@ -3438,7 +3448,8 @@ class V11412WebuiBookshelfTests(unittest.IsolatedAsyncioTestCase):
             "title": f"{title_prefix}标题{index}", "privacy": privacy, "status": "archived",
             "source_kind": "life", "source_ref": f"ref-{index}",
             "summary": f"{title_prefix}摘要{index}", "created_at": moment})
-        await self.store.add_bookshelf_revision(f"doc-{index}", "body", f"正文内容{index}",
+        # 归档章节的口径是 final 终稿修订（每日额度按它逐章计数），种子必须与真实流水线同形。
+        await self.store.add_bookshelf_revision(f"doc-{index}", "final", f"正文内容{index}",
                                                 "fallback", moment, status="archived")
 
     async def test_bookshelf_counts_books_runs_and_latest_work(self):
@@ -4052,8 +4063,11 @@ class V11412WebuiConfigSummaryTests(unittest.IsolatedAsyncioTestCase):
                                                "diary_max_chars", "important_dates_enabled",
                                                "date_model_analysis_enabled",
                                                "date_candidate_retention_days",
-                                               "date_reminder_lead_days"})
+                                               "date_reminder_lead_days",
+                                               "dream_probability", "dream_weekly_max"})
         self.assertEqual(data["memory"]["diary_enabled"], "开启")
+        self.assertAlmostEqual(data["memory"]["dream_probability"], 0.35)
+        self.assertEqual(data["memory"]["dream_weekly_max"], 0)
         self.assertEqual(set(data["information"]), {"enabled", "association_enabled",
                                                     "association_threshold",
                                                     "proactive_share_enabled",
@@ -4078,7 +4092,22 @@ class V11412WebuiConfigSummaryTests(unittest.IsolatedAsyncioTestCase):
                                                  "public_works_enabled",
                                                  "inspiration_lookback_days",
                                                  "external_reading_enabled",
-                                                 "patrol_interval_minutes"})
+                                                 "patrol_interval_minutes",
+                                                 "continuation_enabled",
+                                                 "continuation_probability",
+                                                 "continuation_min_gap_days",
+                                                 "continuation_max_chapters",
+                                                 "continuation_stale_days",
+                                                 "continuation_work_types",
+                                                 "continuation_context_chapters",
+                                                 "continuation_chapter_tail_chars"})
+        self.assertEqual(data["creation"]["continuation_enabled"], "开启")
+        self.assertAlmostEqual(data["creation"]["continuation_probability"], 0.65)
+        self.assertEqual(data["creation"]["continuation_min_gap_days"], 1)
+        self.assertEqual(data["creation"]["continuation_max_chapters"], 8)
+        self.assertEqual(data["creation"]["continuation_stale_days"], 30)
+        self.assertEqual(data["creation"]["continuation_context_chapters"], 3)
+        self.assertEqual(data["creation"]["continuation_chapter_tail_chars"], 400)
         self.assertEqual(set(data["schedule"]), {"generate_hour", "detail_lead_minutes",
                                                  "template_file"})
         self.assertEqual(set(data["proactive"]), {"enabled", "patrol_interval_minutes",

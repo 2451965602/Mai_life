@@ -1,5 +1,38 @@
 # 更新日志
 
+## [1.21.0] - 2026-10-18
+
+### 新增
+
+- **书柜续写**：书柜创作不再每天只开全新短篇（与日记性质重复）。有资格的旧书可按概率续写下一章——
+  章节追加进同一文档、revision 延续、文档全程保持 archived（不会在写作中从书柜消失），
+  书因此逐日增厚。默认 65% 的日子增厚旧书、35% 开新书，可一键回退。
+  - 选题：`continuation_work_types` 与作品类型取交集后查候选（`doc_type='work'` + `status='archived'`，
+    排除日记与阅读笔记），隐私资格过滤通过后才掷概率，无合格候选时不消耗随机流、自然回落新书。
+  - 资格：1 ≤ 章节数 < `continuation_max_chapters`；停滞超过 `continuation_stale_days` 视为完结；
+    同书两章间隔不小于 `continuation_min_gap_days`（0 允许同日续写）。
+  - 上下文：`_book_context` 取首条 outline 当"书的圣经"（书名/前提/原始章节计划），
+    再加最近 N 章提纲与正文字尾；prompt 显式禁止当独立新作、复述已写内容、改标题体裁。
+  - 轮转：候选按 `last_chapter_at` 升序，"等最久的那本优先"。
+- **概率做梦**：不再每个合格夜晚必做梦。`dream_probability`（默认 0.35，约每周 2-3 次）
+  加在原有"睡够 3 小时且非午睡"条件之上；`dream_weekly_max`（默认 0=不限制）提供近 7 天滚动上限。
+  概率门放在 `advance` 醒来分支（`generate_dream` 唯一调用点），`generate_dream` 契约不变。
+- 8 个 `continuation_*` 配置字段归 `[creation]`，2 个 `dream_*` 字段归 `[memory]`，
+  中英文 label/hint 齐全，`webui_config_summary` 已透出。
+- `/麦麦立即创作` 的反馈现在区分"已创作并归档《新书》"与"已为《旧书》续写第 N 章并归档"。
+
+### 说明
+
+- 续写被打断（进程中断/失败）时旧书不会被误标 failed 从书柜消失：`recover_creation_claims`
+  改为"有 final 修订→恢复 archived 且不刷新 updated_at/archived_at"。
+- 续写失败/取消完全不碰文档、不刷 archived_at、不吃当日额度；每日额度按当日归档章节数计，
+  新书与续写每一章都花一个额度（`min_gap_days=0` 时同书当天连写也逐章计数）。
+- 停滞天数 ≤ 最小间隔时候选窗口为空、续写会静默失效：已按小时限流告警，
+  两个字段的 hint 也写明了"必须大于/小于对方"。
+- 分享契机 id 带章节号（`:chN`），避免第 2 章起被 INSERT OR IGNORE 静默丢弃。
+- 无 schema 变更（SCHEMA_VERSION 仍为 14），旧库里的已归档作品直接成为续写候选。
+- 回归：544 个测试全绿（新增 22 个：14 个续写 + 5 个做梦 + 2 个窗口退化/额度语义 + 1 个配置死区守卫）。
+
 ## [1.20.2] - 2026-10-17
 
 ### 修复

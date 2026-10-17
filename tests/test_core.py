@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import math
+import random
 import sqlite3
 import tempfile
 import time
@@ -531,6 +532,7 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
         now=datetime(2026,7,10,10,0,tzinfo=start.tzinfo)
         state=await self.store.get_state(); state["last_updated_at"]=start.timestamp(); await self.store.save_state(state)
         timeline=await self.service.state_timeline(start,now)
+        self.config.memory.dream_probability=1  # 概率做梦默认 0.35：锁定确定性生成，断言不变
         engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
         nodes=self.service._fallback(now.date().isoformat(),False)
         current,_=self.service.current_and_next(nodes,now.hour*60+now.minute-1)
@@ -622,6 +624,7 @@ class RestAndStateTests(unittest.IsolatedAsyncioTestCase):
         async def dream_count():
             return self.store.conn.execute("SELECT COUNT(*) FROM dreams").fetchone()[0]
         engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
+        self.config.memory.dream_probability=1  # 概率做梦默认 0.35：锁定确定性生成，两条断言原样保留
         # 纯午休 4 小时：时长足够但类型是 nap，不做梦。
         await seed(13)
         await engine.advance(base+timedelta(hours=13),{"kind":"nap","summary":"午休","location":"卧室"},None)
@@ -635,6 +638,123 @@ class RestAndStateTests(unittest.IsolatedAsyncioTestCase):
         result=await engine.advance(base+timedelta(days=1,hours=6,minutes=30),{"kind":"meal","summary":"早饭","location":"家"},None)
         self.assertTrue(result["woke"]); self.assertGreaterEqual(result["sleep_duration"],8.0)
         self.assertEqual(await dream_count(),1)
+
+    # 概率做梦：roll 在 advance 醒来分支（life_state.py:156），generate_dream 契约不变。
+    async def _drive_night(self, engine: LifeStateEngine, night_start: datetime) -> dict[str, Any]:
+        """推进一个合格夜晚（22:00 入睡、次日 06:30 自然醒），返回醒来那次 advance 的结果。"""
+        state=await self.store.get_state()
+        state["last_updated_at"]=night_start.timestamp(); state["energy"]=40
+        await self.store.save_state(state)
+        runtime=await self.store.get_sleep_runtime()
+        runtime.update({"phase":"awake","started_at":night_start.timestamp(),"last_event":""})
+        await self.store.save_sleep_runtime(runtime)
+        await engine.advance(night_start,{"kind":"sleep","summary":"夜间睡眠","location":"卧室"},None)
+        return await engine.advance(night_start+timedelta(hours=8.5),
+                                    {"kind":"meal","summary":"早饭","location":"家"},None)
+
+    async def _dream_count(self) -> int:
+        return self.store.conn.execute("SELECT COUNT(*) FROM dreams").fetchone()[0]
+
+    async def _dream_texts(self) -> list[str]:
+        return [str(row[0]) for row in
+                self.store.conn.execute("SELECT content FROM dreams ORDER BY created_at, id").fetchall()]
+
+    async def test_dream_probability_zero_never_dreams_and_keeps_random_stream(self):
+        """p=0：合格夜睡也永不做梦；两端点短路，不消耗全局随机流。"""
+        self.config.memory.dream_probability=0
+        engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
+        random.seed(1); expected=random.random()
+        random.seed(1)
+        result=await self._drive_night(engine,self.now.replace(hour=22))
+        self.assertTrue(result["woke"]); self.assertGreaterEqual(result["sleep_duration"],3)
+        self.assertEqual(await self._dream_count(),0)
+        self.assertEqual(random.random(),expected)
+
+    async def test_dream_probability_one_dreams_every_eligible_night(self):
+        """p=1 且上限默认 0：连睡 3 个合格夜，每晚必做。"""
+        self.config.memory.dream_probability=1
+        self.assertEqual(self.config.memory.dream_weekly_max,0)
+        engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
+        base=self.now.replace(hour=0,minute=0,second=0,microsecond=0)
+        for day in range(3):
+            result=await self._drive_night(engine,base+timedelta(days=day,hours=22))
+            self.assertTrue(result["woke"]); self.assertGreaterEqual(result["sleep_duration"],3)
+            self.assertEqual(await self._dream_count(),day+1)
+
+    async def test_dream_weekly_max_caps_consecutive_nights(self):
+        """每周上限生效：p=1 + 每周上限 2，连睡 5 夜恰好 2 条且落在前两夜（门的先后顺序由源码保证，本用例不锁定）。"""
+        self.config.memory.dream_probability=1; self.config.memory.dream_weekly_max=2
+        engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
+        base=self.now.replace(hour=0,minute=0,second=0,microsecond=0)
+        for day in range(5):
+            await self._drive_night(engine,base+timedelta(days=day,hours=22))
+            self.assertEqual(await self._dream_count(),min(day+1,2))
+
+    async def test_dream_weekly_max_window_slides_past_seven_days(self):
+        """近 7 天滚动窗口：8 天前的旧梦不占额度；最早的梦滑出窗口后额度重新释放。"""
+        self.config.memory.dream_probability=1; self.config.memory.dream_weekly_max=2
+        engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
+        base=self.now.replace(hour=0,minute=0,second=0,microsecond=0)
+        # 第 0 夜醒来于 base+1d 06:30；先塞一条 8 天前的梦，它已滑出 [wake-7d, wake) 窗口。
+        wake0=base+timedelta(days=1,hours=6,minutes=30); old=wake0.timestamp()-8*86400
+        await self.store.add_dream("八天前的一场梦",0.0,0.5,old-8.5*3600,None,created_at=old)
+        self.assertEqual(await self._dream_count(),1)
+        # 前两夜各做一个：若把窗口换成历史全量计数，第 1 夜就会被旧梦顶到上限而拦死。
+        result=await self._drive_night(engine,base+timedelta(days=0,hours=22))
+        self.assertTrue(result["woke"]); self.assertEqual(await self._dream_count(),2)
+        result=await self._drive_night(engine,base+timedelta(days=1,hours=22))
+        self.assertTrue(result["woke"]); self.assertEqual(await self._dream_count(),3)
+        # 第 3 夜：窗口内已有 2 条，上限门先于概率门拦下（上限边界本身既有用例已覆盖）。
+        await self._drive_night(engine,base+timedelta(days=2,hours=22))
+        self.assertEqual(await self._dream_count(),3)
+        # 第 8 夜：第 0 夜的梦滑出 7 天窗口，额度释放可以再做梦；
+        # 历史全量计数会看到 2 条旧梦继续拦，本断言即钉住"过期梦境退出窗口"的滚动语义。
+        result=await self._drive_night(engine,base+timedelta(days=8,hours=22))
+        self.assertTrue(result["woke"]); self.assertEqual(await self._dream_count(),4)
+
+    async def test_dream_probability_partial_nights_are_reproducible_under_seed(self):
+        """中间概率：固定种子下连睡 5 夜只做一部分，且同种子重跑计数与梦境逐位一致。"""
+        async def run(seed_value: int) -> list[str]:
+            random.seed(seed_value)
+            engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
+            base=self.now.replace(hour=0,minute=0,second=0,microsecond=0)
+            for day in range(5):
+                await self._drive_night(engine,base+timedelta(days=day,hours=22))
+            return await self._dream_texts()
+        self.config.memory.dream_probability=0.5
+        first=await run(20260717)
+        self.assertGreater(len(first),0); self.assertLess(len(first),5)
+        # 重建存储后同种子重跑：随机流可复现，梦境条数逐位相同。
+        await self.store.close(); self.tmp.cleanup()
+        self.tmp=tempfile.TemporaryDirectory(); self.store=LifeStore(self.tmp.name); await self.store.initialize()
+        self.assertEqual(await run(20260717),first)
+
+    async def test_dream_probability_one_still_respects_nap_and_short_sleep(self):
+        """p=1 不破坏既有前置条件：纯午休与短睡（<3 小时）都不做梦。"""
+        self.config.memory.dream_probability=1
+        engine=LifeStateEngine(self.store,self.config,DummyLLM(),DummyLogger())
+        base=self.now.replace(hour=0,minute=0,second=0,microsecond=0)
+        async def reset(last_at: datetime):
+            state=await self.store.get_state()
+            state["last_updated_at"]=last_at.timestamp(); state["energy"]=40
+            await self.store.save_state(state)
+            runtime=await self.store.get_sleep_runtime()
+            runtime.update({"phase":"awake","started_at":last_at.timestamp(),"last_event":""})
+            await self.store.save_sleep_runtime(runtime)
+        # 纯午休 4 小时：时长足够但类型是 nap，概率门不介入。
+        nap_start=base+timedelta(hours=13)
+        await reset(nap_start)
+        await engine.advance(nap_start,{"kind":"nap","summary":"午休","location":"卧室"},None)
+        result=await engine.advance(nap_start+timedelta(hours=4),{"kind":"leisure","summary":"放松","location":"家"},None)
+        self.assertTrue(result["woke"]); self.assertGreaterEqual(result["sleep_duration"],3)
+        self.assertEqual(await self._dream_count(),0)
+        # 夜间短睡 1.5 小时：类型正确但时长不足 3 小时，同样不做梦。
+        night_start=base+timedelta(hours=23)
+        await reset(night_start)
+        await engine.advance(night_start,{"kind":"sleep","summary":"夜间睡眠","location":"卧室"},None)
+        result=await engine.advance(night_start+timedelta(hours=1.5),{"kind":"meal","summary":"夜宵","location":"家"},None)
+        self.assertTrue(result["woke"]); self.assertLess(result["sleep_duration"],3)
+        self.assertEqual(await self._dream_count(),0)
 
     async def test_body_cycle_applies_mild_adjustments(self):
         """经期内只做轻度修正：精力消耗提高约 10%，心情增量低于非经期。"""

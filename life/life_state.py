@@ -153,7 +153,10 @@ class LifeStateEngine:
         state["last_updated_at"]=now_ts
         runtime["last_event"]=runtime.get("last_event","")
         await self.store.save_state(state); await self.store.save_sleep_runtime(runtime)
-        if self.config.memory.enabled and woke and sleep_duration>=3 and old_sleep_kind!="nap":
+        # 做梦双门：先查可选的近 7 天上限（默认 0 不限，被拦当晚不掷骰），再掷概率。
+        # 概率门放在 advance 调用点而非 generate_dream 内部，保住其「一次有效夜睡至多一个梦」契约。
+        if (self.config.memory.enabled and woke and sleep_duration>=3 and old_sleep_kind!="nap"
+                and not await self._dream_week_full(now_ts) and self._dream_roll()):
             await self.generate_dream(state, old_sleep_started, sleep_duration,now)
         return {"state":state,"woke":woke,"sleep_duration":sleep_duration}
 
@@ -191,6 +194,23 @@ class LifeStateEngine:
             except (TypeError,ValueError): delta=0
             state[key]=self._clamp(float(state.get(key,0))+delta,low,high)
         state["last_updated_at"]=updated_at or time.time(); await self.store.save_state(state); return state
+
+    # 做梦概率门：每个合格夜晚醒来独立掷一次；两端点短路，不消耗全局随机流
+    # （保住 seeded 测试与 generate_dream 内 random.choice 的流位置）。
+    # 用 `<` 而非 `<=`：避免 p=0 时 random.random()==0.0 的 2^-53 假阳性。
+    def _dream_roll(self) -> bool:
+        p=float(self.config.memory.dream_probability)
+        if p<=0:return False
+        if p>=1:return True
+        return random.random()<p
+
+    # 近 7 天做梦上限门：created_at 口径 [now_ts-7*86400, now_ts) 内已落库梦境数达到
+    # dream_weekly_max 则当晚不做；默认 0=不限制，短路不查库（dreams 表无 created_at 索引）。
+    async def _dream_week_full(self, now_ts: float) -> bool:
+        limit=int(self.config.memory.dream_weekly_max)
+        if limit<=0:return False
+        dreams=await self.store.dreams_between(now_ts-7*86400,now_ts)
+        return len(dreams)>=limit
 
     # 梦境只负责叙事和轻微余韵，不制造预言或重大健康事件。
     async def generate_dream(self, state: dict[str, Any], sleep_started_at: float, hours: float,

@@ -1,4 +1,4 @@
-"""Mai_life v1.20.2 插件入口。"""
+"""Mai_life v1.21.0 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -163,7 +163,10 @@ def _creation_result_text(result:dict[str,Any])->str:
     status=str(result.get("status") or "")
     if status=="archived":
         privacy="公开" if str(result.get("privacy") or "")=="public" else "私人"
-        return f"已创作并归档《{str(result.get('title') or '未命名')}》（{privacy}）"
+        title=str(result.get('title') or '未命名')
+        if result.get("continued"):
+            return f"已为《{title}》续写第 {int(result.get('chapter') or 0)} 章并归档（{privacy}）"
+        return f"已创作并归档《{title}》（{privacy}）"
     if status in {"disabled","plaintext_not_acknowledged"}:return "书柜创作未启用或未确认明文存储。"
     if status in {"daily_limit","daily_limit_zero"}:return "今日创作额度已用完。"
     if status=="low_energy":return "精力不足，先不创作。"
@@ -2606,6 +2609,8 @@ class MaiLifePlugin(MaiBotPlugin):
                     "memory":{"enabled":_switch(cfg.memory.enabled),
                               "dream_fragments_enabled":_switch(cfg.memory.dream_fragments_enabled),
                               "dream_fragment_count":int(cfg.memory.dream_fragment_count),
+                              "dream_probability":round(float(cfg.memory.dream_probability),2),
+                              "dream_weekly_max":int(cfg.memory.dream_weekly_max),
                               "diary_enabled":_switch(cfg.memory.diary_enabled),
                               "diary_hour":int(cfg.memory.diary_hour),
                               "diary_max_chars":int(cfg.memory.diary_max_chars),
@@ -2647,7 +2652,15 @@ class MaiLifePlugin(MaiBotPlugin):
                                 "public_works_enabled":_switch(cfg.creation.public_works_enabled),
                                 "inspiration_lookback_days":int(cfg.creation.inspiration_lookback_days),
                                 "external_reading_enabled":_switch(cfg.creation.external_reading_enabled),
-                                "patrol_interval_minutes":int(cfg.creation.patrol_interval_minutes)},
+                                "patrol_interval_minutes":int(cfg.creation.patrol_interval_minutes),
+                                "continuation_enabled":_switch(cfg.creation.continuation_enabled),
+                                "continuation_probability":round(float(cfg.creation.continuation_probability),2),
+                                "continuation_min_gap_days":int(cfg.creation.continuation_min_gap_days),
+                                "continuation_max_chapters":int(cfg.creation.continuation_max_chapters),
+                                "continuation_stale_days":int(cfg.creation.continuation_stale_days),
+                                "continuation_work_types":"、".join(str(item) for item in cfg.creation.continuation_work_types),
+                                "continuation_context_chapters":int(cfg.creation.continuation_context_chapters),
+                                "continuation_chapter_tail_chars":int(cfg.creation.continuation_chapter_tail_chars)},
                     "schedule":{"generate_hour":int(cfg.schedule.generate_hour),
                                 "detail_lead_minutes":int(cfg.schedule.detail_lead_minutes),
                                 "template_file":str(cfg.schedule.template_file)},

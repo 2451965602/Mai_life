@@ -12,7 +12,7 @@ import re
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import ValidationInfo, field_validator, model_validator
 
-PLUGIN_VERSION = "1.20.2"
+PLUGIN_VERSION = "1.21.0"
 CONFIG_SCHEMA_VERSION = "1.11.0"
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -418,6 +418,32 @@ class CreationSettings(PluginConfigBase):
     reading_annotation_enabled: bool = Field(default=True, description="为外部阅读摘要生成第一人称批注。",
         json_schema_extra=_ui("生成阅读批注", "批注保持 private，朋友无权读取。", 14,
                               label_en="Generate Reading Annotations", hint_en="Annotations remain private and unavailable to friends."))
+    continuation_enabled: bool = Field(default=True, description="启用书柜续写：有资格的旧书可按概率续写下一章。",
+        json_schema_extra=_ui("启用续写旧书", "关闭后与仅创作全新作品的行为完全一致，可一键回退。", 15,
+                              label_en="Enable Bookshelf Continuation", hint_en="Disable to always create brand-new works instead of continuing old ones."))
+    continuation_probability: float = Field(default=0.65, ge=0, le=1, description="存在有资格旧书时选择续写的概率。",
+        json_schema_extra=_ui("续写概率", "0.65 表示约 2/3 的日子增厚旧书、1/3 开新书；1.0 永远先续旧书，0.0 永久只开新书。", 16,
+                              label_en="Continuation Probability", hint_en="Chance of continuing an eligible old book; 1.0 always continues, 0.0 never does."))
+    continuation_min_gap_days: int = Field(default=1, ge=0, le=30, description="同一本书两章之间的最小间隔天数。",
+        json_schema_extra=_ui("续写最小间隔（天）", "按上一章归档时间判断；必须小于续写停滞天数，否则候选窗口为空、续写静默失效；0 允许同一天续写。", 17,
+                              label_en="Continuation Min Gap (days)", hint_en="Minimum days between two chapters of the same book, measured from the last archived chapter."))
+    continuation_max_chapters: int = Field(default=8, ge=2, le=100, description="单本书最多续写的章节数。",
+        json_schema_extra=_ui("单本书章节上限", "达到上限视为完结、不再续写，把机会让给新书。", 18,
+                              label_en="Maximum Chapters per Book", hint_en="A book stops being continued once it reaches this many chapters."))
+    continuation_stale_days: int = Field(default=30, ge=1, le=365, description="多少天没有新章节的书视为完结。",
+        json_schema_extra=_ui("续写停滞天数", "超过该天数没有新章节的书不再续写；必须大于续写最小间隔，否则候选窗口为空、续写静默失效。", 19,
+                              label_en="Continuation Stale Days", hint_en="Books without a new chapter for this many days are treated as finished."))
+    continuation_work_types: list[str] = Field(
+        default_factory=lambda:["novel_fragment","screenplay","storyboard","worldbuilding","character"],
+        description="允许续写的作品类型；运行时与作品类型取交集。",
+        json_schema_extra=_ui("可续写的体裁", "默认只保留连载型体裁；诗与随笔以单篇完整性为美，不参与续写。与上方作品类型的交集为空等于禁用续写。", 20,
+                              label_en="Continuable Work Types", hint_en="Intersected with Work Types; poems and essays are excluded by default."))
+    continuation_context_chapters: int = Field(default=3, ge=1, le=10, description="续写时向模型回看的最近章节数。",
+        json_schema_extra=_ui("回看章节数", "控制 Prompt 体积与 Token 成本的线性上限。", 21,
+                              label_en="Context Chapters", hint_en="How many recent chapters are replayed into the continuation prompt."))
+    continuation_chapter_tail_chars: int = Field(default=400, ge=0, le=2000, description="每章回看携带的正文字尾字符数。",
+        json_schema_extra=_ui("每章正文字尾字符", "0 表示只回看章节提纲、不带上文，进一步压低成本。", 22,
+                              label_en="Chapter Tail Characters", hint_en="Trailing body characters replayed per chapter; zero replays outlines only."))
 
 
 class EnvironmentSettings(PluginConfigBase):
@@ -527,39 +553,49 @@ class MemorySettings(PluginConfigBase):
         json_schema_extra=_ui("梦境碎片数量", "范围 1～5，默认 3。", 2,
                               label_en="Dream Fragment Count", hint_en="Maximum fragments stored per dream."),
     )
+    dream_probability: float = Field(
+        default=0.35, ge=0, le=1, description="合格夜晚醒来后实际生成梦境的概率。",
+        json_schema_extra=_ui("做梦概率", "每个合格夜晚醒来独立掷一次，0.35 表示约每周 2～3 次；0 永不做梦，1 每晚必做。午睡和短睡路径不掷。", 3,
+                              label_en="Dream Probability", hint_en="Rolled once per eligible night wake-up; 0 never dreams, 1 always does. Naps are not rolled."),
+    )
+    dream_weekly_max: int = Field(
+        default=0, ge=0, le=7, description="近 7 天已落库梦境数上限。",
+        json_schema_extra=_ui("每周梦境上限", "默认 0 不限制，只靠上方概率单旋钮；设为正数后，近 7 天梦境数达到上限的当晚直接跳过做梦，是对冲连彩的可选保险。", 4,
+                              label_en="Weekly Dream Limit", hint_en="Default 0 disables the cap. When set, nights already at the recent 7-day limit skip dreaming."),
+    )
     diary_enabled: bool = Field(
         default=True, description="每天生成前一天的抽象日记。",
-        json_schema_extra=_ui("启用抽象日记", "只使用生活节点、梦境和互动数量，不复制聊天原文。", 3,
+        json_schema_extra=_ui("启用抽象日记", "只使用生活节点、梦境和互动数量，不复制聊天原文。", 5,
                               label_en="Enable Abstract Diary", hint_en="Uses life events and interaction counts, never chat transcripts."),
     )
     diary_hour: int = Field(
         default=2, ge=0, le=23, description="每天结算前一天日记的小时。",
-        json_schema_extra=_ui("日记结算时间（小时）", "默认凌晨 2 点，在 3 点生成新日程之前完成。", 4,
+        json_schema_extra=_ui("日记结算时间（小时）", "默认凌晨 2 点，在 3 点生成新日程之前完成。", 6,
                               label_en="Diary Settlement Hour", hint_en="Hour used to settle the previous day."),
     )
     diary_max_chars: int = Field(
         default=1200, ge=300, le=4000, description="单篇日记正文最大字符数。",
-        json_schema_extra=_ui("日记长度上限", "限制日记和后续 Prompt 占用。", 5,
+        json_schema_extra=_ui("日记长度上限", "限制日记和后续 Prompt 占用。", 7,
                               label_en="Diary Length Limit", hint_en="Maximum characters in one diary entry."),
     )
     important_dates_enabled: bool = Field(
         default=True, description="识别并维护生日、考试、约定等日期。",
-        json_schema_extra=_ui("启用重要日期", "明确日期自动记录，模糊日期只进入待确认列表。", 6,
+        json_schema_extra=_ui("启用重要日期", "明确日期自动记录，模糊日期只进入待确认列表。", 8,
                               label_en="Enable Important Dates", hint_en="Save explicit dates and keep ambiguous dates as candidates."),
     )
     date_model_analysis_enabled: bool = Field(
         default=False, description="本地规则未识别时调用快速模型分析日期。",
-        json_schema_extra=_ui("启用日期模型分析", "默认关闭；开启会增加私聊后的异步模型调用。", 7,
+        json_schema_extra=_ui("启用日期模型分析", "默认关闭；开启会增加私聊后的异步模型调用。", 9,
                               label_en="Enable Date Model Analysis", hint_en="Disabled by default because it adds an asynchronous model call."),
     )
     date_candidate_retention_days: int = Field(
         default=90, ge=7, le=365, description="未确认日期候选的保留天数。",
-        json_schema_extra=_ui("日期候选保留天数", "过期候选只清理待确认项，不删除正式日期。", 8,
+        json_schema_extra=_ui("日期候选保留天数", "过期候选只清理待确认项，不删除正式日期。", 10,
                               label_en="Date Candidate Retention", hint_en="Retention for unconfirmed date candidates."),
     )
     date_reminder_lead_days: list[int] = Field(
         default_factory=lambda: [30,7,1,0], description="重要日期提前准备和提醒的天数。",
-        json_schema_extra=_ui("重要日期提前天数", "默认提前 30、7、1 天以及当天生成一次专属契机。", 9,
+        json_schema_extra=_ui("重要日期提前天数", "默认提前 30、7、1 天以及当天生成一次专属契机。", 11,
                               label_en="Important Date Lead Days", hint_en="Days before an event when a private opportunity may be created."),
     )
     @field_validator("date_reminder_lead_days", mode="before")
