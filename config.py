@@ -12,7 +12,7 @@ import re
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import ValidationInfo, field_validator, model_validator
 
-PLUGIN_VERSION = "1.21.0"
+PLUGIN_VERSION = "1.22.0"
 CONFIG_SCHEMA_VERSION = "1.11.0"
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -803,7 +803,7 @@ class RestGateSettings(PluginConfigBase):
         default_factory=lambda: ["sleep", "nap"],
         description="哪些日程类型启用休息回复闸门。",
         json_schema_extra=_ui(
-            "闸门生效的日程类型", "夜窗/午休窗内闸门一定生效；这里列出的日程类型在任意时间也会生效。加入 rest 后，普通休息段也可能不回复。", 5,
+            "闸门生效的日程类型", "夜窗/午休窗内闸门一定生效；这里列出的日程类型在任意时间也会生效。注意默认含 sleep/nap：日程一进入睡眠/午休段闸门就生效，可能早于夜窗开始时间（如夜窗设 00:00 而日程 22:30 就寝，22:30 即开始屏蔽）；只想按夜窗控制就清空本列表。加入 rest 后，普通休息段也可能不回复。", 5,
             label_en="Gated Schedule Types", hint_en="Night/nap windows always gate; listed segment types gate at any time. Adding rest also gates ordinary rest periods.",
             enum_labels={"sleep": "夜间睡眠（sleep）", "nap": "午休小睡（nap）", "rest": "普通休息（rest）"},
         ),
@@ -817,7 +817,7 @@ class RestGateSettings(PluginConfigBase):
     )
     night_start: str = Field(
         default="22:30", description="夜间闸门开始时间。",
-        json_schema_extra=_ui("夜间闸门开始", "默认 22:30，支持跨午夜。", 6, label_en="Night Gate Start", hint_en="Night gate start in HH:MM format."),
+        json_schema_extra=_ui("夜间闸门开始", "默认 22:30，支持跨午夜；与结束时间相同则该窗口永不生效（只剩日程类型一条路）。", 6, label_en="Night Gate Start", hint_en="Night gate start in HH:MM format."),
     )
     night_end: str = Field(
         default="08:00", description="夜间闸门结束时间。",
@@ -846,7 +846,7 @@ class RestGateSettings(PluginConfigBase):
     )
     group_night_start: str = Field(
         default="22:30", description="群夜间闸门开始时间。",
-        json_schema_extra=_ui("群夜间闸门开始", "默认 22:30，支持跨午夜；独立于私聊设置。", 11, label_en="Group Night Start", hint_en="Group night window start in HH:MM format."),
+        json_schema_extra=_ui("群夜间闸门开始", "默认 22:30，支持跨午夜；与结束时间相同则该窗口永不生效。", 11, label_en="Group Night Start", hint_en="Group night window start in HH:MM format."),
     )
     group_night_end: str = Field(
         default="08:00", description="群夜间闸门结束时间。",
@@ -860,6 +860,16 @@ class RestGateSettings(PluginConfigBase):
         default="14:30", description="群午休闸门结束时间。",
         json_schema_extra=_ui("群午休闸门结束", "默认 14:30。", 14, label_en="Group Nap End", hint_en="Group nap window end in HH:MM format."),
     )
+    group_gate_segment_types: list[str] = Field(
+        default_factory=lambda: ["sleep", "nap"],
+        description="哪些日程类型在任意时间也触发群闸门（与群时间窗 OR）。",
+        json_schema_extra=_ui("群闸门生效的日程类型",
+            "群夜窗/午休窗内一定生效；这里列出的类型在任意时间也生效。默认与私聊一致：夜间睡眠+午休。", 16,
+            label_en="Group Gated Schedule Types",
+            hint_en="Group quiet windows always gate; listed segment kinds gate at any time."),
+        enum_labels={"sleep": "夜间睡眠（sleep）", "nap": "午休小睡（nap）", "rest": "普通休息（rest）",
+                     "study": "学习（study）", "work": "工作（work）", "leisure": "休闲（leisure）",
+                     "meal": "餐饮（meal）", "travel": "出行（travel）"})
     group_force_wake_terms: list[str] = Field(
         default_factory=lambda: ["救命","急事","报警","醒醒","快醒","叫醒","出事了","很难受","撑不住","危险","轻生","自杀"],
         description="群强制唤醒词：群消息含其中任意一词时放行；独立于私聊词表。",

@@ -164,6 +164,27 @@ night_end = "08:00"
 nap_start = "12:00"
 nap_end = "14:30"
 
+# ===== 群聊休息闸门（独立于私聊，默认关闭）=====
+# 开启后，在下方群时间窗内，群里只有含强制唤醒词的消息会被回复，其余静默
+# （不回复、不积压、不进主程序，因此不产生 Planner/Replyer/VLM 请求）。
+group_enabled = false
+
+# 作用范围：all=所有群；selected=只对社交白名单中开了「夜间静音」的群生效。
+group_mode = "all"
+
+# 群夜间/午休窗（独立于私聊设置，支持跨午夜）。
+group_night_start = "22:30"
+group_night_end = "08:00"
+group_nap_start = "12:00"
+group_nap_end = "14:30"
+
+# 群闸门生效的日程类型：群时间窗内一定生效；列出的类型在任意时间也生效（OR 语义）。
+# 与私聊 gate_segment_types 同构，默认只保留夜间睡眠和午休。
+group_gate_segment_types = ["sleep", "nap"]
+
+# 群强制唤醒词：群消息含任意一词立即放行；独立于私聊词表。
+group_force_wake_terms = ["救命", "急事", "报警", "醒醒", "快醒", "叫醒", "出事了", "很难受", "撑不住", "危险", "轻生", "自杀"]
+
 
 [context]
 enabled = true

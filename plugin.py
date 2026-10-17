@@ -1,4 +1,4 @@
-"""Mai_life v1.21.0 插件入口。"""
+"""Mai_life v1.22.0 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -1008,7 +1008,13 @@ class MaiLifePlugin(MaiBotPlugin):
         # 群休息闸门（轻量版）：在群轮次登记与观察之前判定；被阻断的消息不进主程序，
         # 因此不产生 Planner/Replyer/VLM 等主程序模型请求，也不留积压与候选。
         if self._rest:
-            group_allowed,group_reason=self._rest.decide_group(direct_text(merged),self._env.now(),group_id)
+            # 群闸门与私聊同构：时间窗 OR 配置的日程类型；日程段取当前框架节点
+            # （_schedule 未装配时退化为纯时间窗，与改动前一致）。
+            group_segment=None
+            if self._schedule:
+                group_segment=(await self._schedule.context(self._env.now())).get("current")
+            group_allowed,group_reason=self._rest.decide_group(
+                direct_text(merged),self._env.now(),group_id,group_segment)
             if not group_allowed:
                 self.ctx.logger.info(f"[MaiLife] 群休息闸门阻断 group={group_id or session} user={uid} reason={group_reason}")
                 return {"action":"abort"}
@@ -2605,7 +2611,8 @@ class MaiLifePlugin(MaiBotPlugin):
                                  "nap_window":f"{gate.nap_start}-{gate.nap_end}",
                                  "group_enabled":_switch(gate.group_enabled),"group_mode":str(gate.group_mode),
                                  "group_night_window":f"{gate.group_night_start}-{gate.group_night_end}",
-                                 "group_nap_window":f"{gate.group_nap_start}-{gate.group_nap_end}"},
+                                 "group_nap_window":f"{gate.group_nap_start}-{gate.group_nap_end}",
+                                 "group_segment_types":"、".join(gate.group_gate_segment_types)},
                     "memory":{"enabled":_switch(cfg.memory.enabled),
                               "dream_fragments_enabled":_switch(cfg.memory.dream_fragments_enabled),
                               "dream_fragment_count":int(cfg.memory.dream_fragment_count),

@@ -1676,6 +1676,39 @@ class GroupGateDecisionTests(unittest.IsolatedAsyncioTestCase):
         allowed, reason = gate.decide_group("午安", NOON, "100")
         self.assertFalse(allowed)
 
+    async def test_listed_segment_type_gates_outside_window(self):
+        """group_gate_segment_types 与私聊 OR 语义一致：列出的日程类型在任意时间生效。
+
+        默认列表与私聊一致（sleep/nap）：15:00 不在群夜窗/午休窗内，但段类型命中即静默。
+        """
+        gate = self._gate(make_group_config(group_gate=True))
+        allowed, reason = gate.decide_group("下午好呀", DAYTIME, "100", {"kind": "nap"})
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "群休息时段静默")
+
+    async def test_unlisted_segment_type_passes_outside_window(self):
+        gate = self._gate(make_group_config(group_gate=True))
+        allowed, reason = gate.decide_group("下午好呀", DAYTIME, "100", {"kind": "leisure"})
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "outside_group_window")
+
+    async def test_segment_type_gate_respects_force_wake_term(self):
+        """日程类型命中时，强制唤醒词仍然放行（与时间窗内行为一致）。"""
+        gate = self._gate(make_group_config(group_gate=True))
+        allowed, reason = gate.decide_group("出事了救命啊", DAYTIME, "100", {"kind": "nap"})
+        self.assertTrue(allowed)
+        self.assertIn("强制唤醒词", reason)
+
+    async def test_configured_segment_types_replace_defaults(self):
+        """配置改成 study 后，rest 段不再闸群、study 段才闸。"""
+        config = make_group_config(group_gate=True)
+        config.rest_gate.group_gate_segment_types = ["study"]
+        gate = self._gate(config)
+        allowed, _ = gate.decide_group("在吗", DAYTIME, "100", {"kind": "rest"})
+        self.assertTrue(allowed)
+        allowed, _ = gate.decide_group("在吗", DAYTIME, "100", {"kind": "study"})
+        self.assertFalse(allowed)
+
     async def test_master_switch_off_passes(self):
         gate = self._gate(make_group_config(group_gate=False))
         allowed, reason = gate.decide_group("凌晨闲聊", NIGHT, "100")
@@ -4048,7 +4081,8 @@ class V11412WebuiConfigSummaryTests(unittest.IsolatedAsyncioTestCase):
                                                   "llm_threshold", "awake_grace_minutes",
                                                   "silence_minutes", "night_window", "nap_window",
                                                   "group_enabled", "group_mode",
-                                                  "group_night_window", "group_nap_window"})
+                                                  "group_night_window", "group_nap_window",
+                                                  "group_segment_types"})
         self.assertEqual(data["rest_gate"]["night_window"], "23:00-07:30")
         self.assertEqual(data["rest_gate"]["nap_window"], "12:00-14:30")
         self.assertEqual(data["rest_gate"]["group_night_window"], "22:30-08:00")
@@ -4881,6 +4915,24 @@ class V11412GateSegmentTypeTests(unittest.IsolatedAsyncioTestCase):
         allowed, reason = await self._gate().decide(
             "1", "在吗", datetime(2026, 9, 21, 15, 0, tzinfo=TZ), {"kind": "leisure"})
         self.assertTrue(allowed); self.assertEqual(reason, "outside_gate_window")
+
+    async def test_sleep_segment_gates_before_night_start(self):
+        """两条触发路径相互独立：夜窗改成 00:00 也挡不住睡眠段提前生效。
+
+        用户实测踩坑：night_start 设 00:00，但日程 22:30 就寝（kind=sleep），
+        gate_segment_types 默认含 sleep → 22:30 就开始屏蔽。清空该列表才只按夜窗控制。
+        """
+        self.config.rest_gate.night_start = "00:00"
+        self.config.rest_gate.night_end = "08:00"
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 22, 30, tzinfo=TZ), {"kind": "sleep"})
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "probability:0.00")
+        self.config.rest_gate.gate_segment_types = []
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 22, 30, tzinfo=TZ), {"kind": "sleep"})
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "outside_gate_window")
 
     async def test_window_still_gates_regardless_of_segment_kind(self):
         """P2-4 回归：默认框架的 leisure 段落在夜窗内，闸门照常生效。"""

@@ -29,7 +29,7 @@ class ContractTests(unittest.TestCase):
         manifest=json.loads((root/"_manifest.json").read_text(encoding="utf-8-sig"))
         requirements=(root/"requirements.txt").read_text(encoding="utf-8")
         readme=(root/"README.md").read_text(encoding="utf-8")
-        self.assertEqual(manifest["version"],"1.21.0")
+        self.assertEqual(manifest["version"],"1.22.0")
         self.assertIn("playwright>=1.49,<2",requirements)
         self.assertIn("python -m playwright install chromium",readme)
         self.assertIn("Playwright/Bing",readme)
@@ -38,10 +38,10 @@ class ContractTests(unittest.TestCase):
         from Mai_life.config import PLUGIN_VERSION
         from Mai_life.information.http_client import _USER_AGENT
         root=Path(__file__).parents[1]
-        self.assertEqual(PLUGIN_VERSION,"1.21.0")
+        self.assertEqual(PLUGIN_VERSION,"1.22.0")
         self.assertIn(f"Mai_life/{PLUGIN_VERSION}",_USER_AGENT)
         self.assertNotIn("1.9.2",_USER_AGENT)
-        # 菜单、管理概览与入口的显示版本必须统一为 1.21.0，不允许残留旧版本号。
+        # 菜单、管理概览与入口的显示版本必须统一为 1.22.0，不允许残留旧版本号。
         for relative in ("plugin.py","management/admin_service.py","messaging/menu_renderer.py",
                          "information/http_client.py","core/environment.py","config.py",
                          "README.md","_manifest.json"):
@@ -502,7 +502,8 @@ class WebuiApiContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(data["rest_gate"]),{"enabled","mode","wake_probability","llm_threshold",
                                                  "awake_grace_minutes","silence_minutes","night_window",
                                                  "nap_window","group_enabled","group_mode",
-                                                 "group_night_window","group_nap_window"})
+                                                 "group_night_window","group_nap_window",
+                                                 "group_segment_types"})
         self.assertEqual(set(data["search_api"]),{"tool_enabled","history_enabled","history_retention_days",
                                                   "timeout_seconds","max_attempts","max_results","provider_count"})
         # 布尔一律翻成「开启/关闭」，不出现裸布尔；数值型参数与 version 不参与该检查。
