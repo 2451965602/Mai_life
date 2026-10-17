@@ -10,6 +10,9 @@ class SearchResult:
     url:str
     snippet:str
     provider_generated:bool=False
+    # 弱相关标记：由 Playwright 解析侧填充，语义=该条目标题/摘要与查询词没有实质词元重叠。
+    # API 路线暂不填充，保持默认 False。消费方（news 入库过滤、工具层"搜不到"信号）据此判断。
+    weak:bool=False
 
 
 @dataclass(frozen=True)

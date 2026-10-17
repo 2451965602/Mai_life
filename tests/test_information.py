@@ -14,7 +14,7 @@ from Mai_life.information import http_client
 from Mai_life.information.feed_parser import readable_text
 from Mai_life.information.http_client import HttpClient,HttpRequestError,HttpResponse
 from Mai_life.information.information_service import InformationService
-from Mai_life.information.search_models import SearchBackendError
+from Mai_life.information.search_models import SearchBackendError,SearchResponse,SearchResult
 from Mai_life.information.search_parsing import clean_generated_text,parse_openai_citations,parse_openai_usage
 from Mai_life.information.search_providers import ApiProvider,PlaywrightProvider,PROVIDER_STRATEGIES,SearchAttemptError,get_provider_strategy
 from Mai_life.information.search_service import SearchService
@@ -62,7 +62,7 @@ class QueryLLM:
 
 
 class LeakyNewsLLM:
-    """模拟模型把 QQ、昵称、群名、邮箱和网址写进新闻查询词，验证外发前统一清洗。"""
+    """模拟模型把 QQ、昵称、群名、邮箱和网址写进新闻查询词，验证外发前只移除本地私有多词禁词。"""
     def task_available(self,kind):return kind in {"news","relevance"}
     async def generate_json(self,prompt,system,fallback,max_tokens=0,**kwargs):
         del prompt,system,max_tokens
@@ -189,6 +189,39 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(responses_call["body"]["tools"],[{"type":"web_search"}])
         usage=await self.store.usage_summary(0)
         self.assertEqual(sum(int(item["total_tokens"] or 0) for item in usage if item["source"]=="search_api_model"),25)
+
+    async def test_freshness_tiers_reach_bocha_tavily_you_and_openai_routes(self):
+        """day/week/month/year 四档贯通：bocha/tavily/you 走原生参数，openai 两条路线降级为时间约束；any 不传。"""
+        # bocha 与 tavily：原生 freshness / days 映射（week 档）
+        for kind in ("bocha","tavily"):
+            config=MaiLifeSettings(); config.search_api.providers=[self._provider(kind)]
+            service=SearchService(config,HttpClient(DummyLogger()),self.store,DummyLogger())
+            LocalHandler.calls=[]
+            self.assertTrue((await service.search("科技",freshness="week")).results)
+            body=next(item for item in LocalHandler.calls if item["path"]=="/"+kind)["body"]
+            if kind=="bocha":self.assertEqual(body.get("freshness"),"oneWeek")
+            else:self.assertEqual((body.get("days"),body.get("topic")),(7,"news"))
+        # you.com：原生 freshness 查询参数
+        LocalHandler.calls=[]
+        you_config=MaiLifeSettings(); you_config.search_api.providers=[self._provider("you")]
+        you_service=SearchService(you_config,HttpClient(DummyLogger()),self.store,DummyLogger())
+        self.assertTrue((await you_service.search("科技",freshness="month")).results)
+        self.assertIn("freshness=month",next(item for item in LocalHandler.calls if item["path"]=="/you")["query"])
+        # openai_responses 降级为 instructions；openai_chat 追加进 system 提示
+        for kind,path in (("openai_responses","/v1/responses"),("openai_chat","/v1/chat/completions")):
+            LocalHandler.calls=[]
+            cfg=MaiLifeSettings(); cfg.search_api.providers=[self._provider(kind)]
+            svc=SearchService(cfg,HttpClient(DummyLogger()),self.store,DummyLogger())
+            self.assertTrue((await svc.search("科技",freshness="day")).results)
+            body=next(item for item in LocalHandler.calls if item["path"]==path)["body"]
+            if kind=="openai_responses":self.assertEqual(body.get("instructions"),"只返回最近 24 小时内的信息。")
+            else:self.assertIn("只返回最近 24 小时内的信息。",body["messages"][0]["content"])
+        # any：不设置任何 freshness 过滤
+        LocalHandler.calls=[]
+        any_config=MaiLifeSettings(); any_config.search_api.providers=[self._provider("bocha")]
+        any_service=SearchService(any_config,HttpClient(DummyLogger()),self.store,DummyLogger())
+        self.assertTrue((await any_service.search("科技",freshness="any")).results)
+        self.assertIsNone(next(item for item in LocalHandler.calls if item["path"]=="/bocha")["body"].get("freshness"))
 
     async def test_auth_failure_switches_key_and_never_persists_raw_keys(self):
         logger=DummyLogger(); config=MaiLifeSettings()
@@ -376,7 +409,37 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items),1); self.assertIn("Provider 生成、无外部引用",items[0]["summary"])
         self.assertEqual(items[0]["url"],""); self.assertTrue(items[0]["source_id"].endswith(":uncited"))
 
-    async def test_active_search_scrubs_qq_auto_names_email_and_url(self):
+    async def test_news_skips_weak_results_and_dedups_by_url_across_providers(self):
+        """入库前过滤弱相关条目；去重键只由 url 决定，provider_id 变化不再让同一条新闻重复入库。"""
+        config=MaiLifeSettings(); config.information.enabled=True; config.news.enabled=True
+        config.information.association_threshold=0.2; config.news.full_text_count=0  # 不发起正文抓取
+        service=InformationService(DummyContext(),self.store,config,BatchLLM(),DummyLogger())
+        state={"n":0}
+        async def fake_search(query,*,operation,freshness="",event_at=0):
+            del query,operation,freshness,event_at; state["n"]+=1
+            if state["n"]==1:
+                # 一条相关 + 一条弱相关，provider_id=p1
+                return SearchResponse(results=[
+                    SearchResult("相关科技新闻","https://example.com/a","摘要A"),
+                    SearchResult("无关论坛帖","https://example.com/weak","Minecraft 摘要",weak=True),
+                ],provider_id="p1",provider_type="bocha")
+            # 同一条 url、不同 provider_id，模拟配置变更后再次命中的同一条新闻
+            return SearchResponse(results=[
+                SearchResult("相关科技新闻","https://example.com/a","摘要A"),
+            ],provider_id="p2",provider_type="tavily")
+        service.search.search=fake_search
+        schedule={"current":{"kind":"leisure","summary":"休息"},"next":None}
+        first=await service.news.refresh_due(self.now,schedule,"人格")
+        second=await service.news.refresh_due(self.now+timedelta(minutes=10),schedule,"人格")
+        items=await self.store.recent_news_items(self.now.timestamp(),10)
+        self.assertEqual(first,1)   # 只有相关那条入库，弱相关被过滤
+        self.assertEqual(second,0)  # 同 url 已存在，去重后无新增
+        self.assertEqual(len(items),1)
+        self.assertEqual(items[0]["url"],"https://example.com/a")
+        self.assertNotIn("https://example.com/weak",[item["url"] for item in items])
+
+    async def test_active_search_removes_private_terms_but_keeps_urls_and_emails(self):
+        """重新设计后：本地私有多词禁词（QQ/昵称/群名）按整词移除；邮箱与网址不再被正则清洗删除。"""
         config=MaiLifeSettings(); config.information.enabled=True; config.search.enabled=True
         config.search.include_chat_topics=True; config.search_api.providers=[self._provider("bocha")]
         config.users.profiles=[UserProfile(user_id="10001")]
@@ -387,8 +450,13 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
         schedule={"current":{"kind":"leisure"},"next":None}
         self.assertTrue(await service.explore_due(self.now,"人格",await self.store.get_state(),schedule,["秘密群里的话题"]))
         query=next(item["body"]["query"] for item in LocalHandler.calls if item["path"]=="/bocha")
-        for private in ("10001","小麦","秘密群","test@example.com","private.example"):
+        # 本地私有多词禁词被整词移除
+        for private in ("10001","小麦","秘密群"):
             self.assertNotIn(private,query)
+        # 邮箱与网址不再清洗删除（新意图：本插件无隐私需要那套正则清洗）
+        self.assertIn("test@example.com",query)
+        self.assertIn("https://private.example/a",query)
+        self.assertIn("科技",query)
 
     async def test_group_member_nickname_never_leaks_into_external_search(self):
         """群成员昵称（group_user_activity）同样属于外发查询词的禁词。"""
@@ -413,7 +481,7 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(private,str(history))
 
     async def test_news_query_is_sanitized_before_external_search(self):
-        """新闻规划词即使被模型写成含隐私词，外发 provider 前也会被统一清洗。"""
+        """新闻规划词即使被模型写成含隐私词，外发 provider 前也会按整词移除本地私有多词禁词；邮箱/网址保留。"""
         config=MaiLifeSettings(); config.information.enabled=True; config.news.enabled=True
         config.information.association_threshold=0.2; config.search_api.providers=[self._provider("bocha")]
         config.users.profiles=[UserProfile(user_id="10001")]
@@ -427,15 +495,20 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
         news_calls=[item for item in LocalHandler.calls if item["path"]=="/bocha"]
         self.assertEqual(len(news_calls),1)
         query=news_calls[0]["body"]["query"]
-        for private in ("10001","小麦","秘密群","test@example.com","private.example"):
+        # 本地私有多词禁词被整词移除
+        for private in ("10001","小麦","秘密群"):
             self.assertNotIn(private,query)
+        # 邮箱与网址不再清洗删除（新意图）
+        self.assertIn("test@example.com",query)
+        self.assertIn("https://private.example/a",query)
         self.assertIn("科技",query)
+        # 本地历史里同样不出现本地私有多词禁词
         history=await self.store.recent_search_history(self.now.timestamp(),10,operation="news")
-        for private in ("10001","小麦","秘密群","test@example.com","private.example"):
+        for private in ("10001","小麦","秘密群"):
             self.assertNotIn(private,str(history))
 
-    async def test_sanitize_query_scrubs_encoded_fullwidth_single_char_and_domains(self):
-        """统一清洗：全角邮箱、URL 编码昵称、单字昵称与裸域名都被移除，正常查询不受影响。"""
+    async def test_sanitize_query_removes_private_terms_only_and_keeps_technical_terms(self):
+        """重新设计后：只按整词移除本地私有多词禁词；技术名词、邮箱、网址不再被当域名/邮箱正则删除。"""
         config=MaiLifeSettings()
         config.users.profiles=[UserProfile(user_id="10001")]
         config.social.groups=[SocialGroupProfile(group_id="20001")]
@@ -444,17 +517,36 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
         await self.store.upsert_group_directory("20001","秘密群","group-stream",self.now.timestamp())
         await self.store.record_group_activity("20001","30001","犇",self.now.timestamp())
         service=SearchService(config,HttpClient(DummyLogger()),self.store,DummyLogger())
-        self.assertEqual(await service.sanitize_query("test＠example.com 新闻"),"新闻")
-        self.assertEqual(await service.sanitize_query("%E5%B0%8F%E9%BA%A6 新闻"),"新闻")
-        self.assertEqual(await service.sanitize_query("%25E5%25B0%258F%25E9%25BA%25A6 新闻"),"新闻")
+        # 单字昵称独立成词时删除
         self.assertEqual(await service.sanitize_query("犇 科技新闻"),"科技新闻")
-        self.assertEqual(await service.sanitize_query("private.example/x 新闻"),"新闻")
-        self.assertEqual(await service.sanitize_query("科技 最新新闻"),"科技 最新新闻")
+        # 技术名词不再被当裸域名整词删掉（旧实现会清成 '15 升级指南'）
+        self.assertEqual(await service.sanitize_query("Next.js 15 升级指南"),"Next.js 15 升级指南")
+        # 邮箱与网址保留，仅移除 QQ/昵称/群名
         self.assertEqual(await service.sanitize_query(
-            "10001 小麦 秘密群 test@example.com https://private.example/a 科技"),"科技")
+            "10001 小麦 秘密群 test@example.com https://private.example/a 科技"),
+            "test@example.com https://private.example/a 科技")
+        # 无禁词时原样返回
+        self.assertEqual(await service.sanitize_query("科技 最新新闻"),"科技 最新新闻")
         self.assertEqual(await service.sanitize_query(""),"")
 
-    async def test_web_search_tool_scrubs_private_terms_and_allows_repeated_calls(self):
+    async def test_sanitize_query_whole_token_match_never_damages_substring(self):
+        """整词边界：禁词作为子串出现时不误伤正常查询；嵌在更长词元里的 QQ 号也不删。"""
+        config=MaiLifeSettings()
+        config.users.profiles=[UserProfile(user_id="10001")]
+        await self.store.sync_users(config.users.profiles)
+        await self.store.update_user_display_name("10001","天气")  # 昵称恰是常用词
+        service=SearchService(config,HttpClient(DummyLogger()),self.store,DummyLogger())
+        # '天气'作为子串：不误伤（旧实现会删成 '明天 怎么样'）
+        self.assertEqual(await service.sanitize_query("明天天气怎么样"),"明天天气怎么样")
+        self.assertEqual(await service.sanitize_query("天气预报 新闻"),"天气预报 新闻")
+        self.assertEqual(await service.sanitize_query("查天气"),"查天气")
+        # 独立成词：删除
+        self.assertEqual(await service.sanitize_query("天气 新闻"),"新闻")
+        # QQ 号独立成词删除，嵌在更长词元里不动
+        self.assertEqual(await service.sanitize_query("订单 10001 详情"),"订单 详情")
+        self.assertEqual(await service.sanitize_query("编号10001x 查询"),"编号10001x 查询")
+
+    async def test_web_search_tool_removes_private_terms_and_allows_repeated_calls(self):
         config=MaiLifeSettings(); config.information.enabled=True
         config.search_api.tool_enabled=True
         config.search_api.providers=[self._provider("bocha")]
@@ -470,8 +562,11 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(first["success"]); self.assertEqual(len(first["results"]),2)
         self.assertIn("外部联网搜索结果",first["content"]); self.assertIn("https://example.com/news/1",first["content"])
-        for private in ("10001","小麦","秘密群","test@example.com","private.example"):
+        # 本地私有多词禁词被整词移除；邮箱与网址保留（新意图）
+        for private in ("10001","小麦","秘密群"):
             self.assertNotIn(private,first["query"])
+        self.assertIn("test@example.com",first["query"])
+        self.assertIn("https://private.example/a",first["query"])
         call=next(item for item in LocalHandler.calls if item["path"]=="/bocha")
         self.assertEqual(call["body"].get("freshness"),"oneDay")
 
@@ -481,6 +576,22 @@ class InformationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.search_attempt_count(
             "tool_search",start.timestamp(),(start+timedelta(days=1)).timestamp(),
         ),2)
+
+    async def test_web_search_tool_reports_weak_only_as_not_found(self):
+        """结果整体弱相关时，工具路径明确告知未找到密切相关的结果，不静默当成成功。"""
+        config=MaiLifeSettings(); config.information.enabled=True
+        config.search_api.tool_enabled=True; config.search_api.providers=[self._provider("bocha")]
+        service=InformationService(DummyContext(),self.store,config,OfflineLLM(),DummyLogger())
+        async def fake_search(query,*,operation,freshness="",event_at=0):
+            del query,operation,freshness,event_at
+            return SearchResponse(results=[
+                SearchResult("无关结果一","https://example.com/x1","Minecraft 论坛摘要",weak=True),
+                SearchResult("无关结果二","https://example.com/x2","游戏 MOD 讨论",weak=True),
+            ],provider_id="p1",provider_type="playwright",cited=True)
+        service.search.search=fake_search
+        result=await service.search_for_tool("zzqqxx-nonexistent-query-91827364",self.now)
+        self.assertFalse(result["success"]); self.assertTrue(result.get("weak"))
+        self.assertIn("未找到",result["content"]); self.assertIn("密切相关",result["content"])
 
     async def test_web_search_tool_respects_connected_discovery_switch(self):
         config=MaiLifeSettings(); config.search_api.providers=[self._provider("bocha")]
