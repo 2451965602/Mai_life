@@ -89,7 +89,11 @@ Mai_life/
 ├── plugin.py             # 入口：组合 17 个服务 + 注册 7 Hook / 2 Tool / 22 Command / 18 API / 1 HomeCard（约 1700 行）
 ├── config.py             # Pydantic 配置模型（WebUI 中文字段 + i18n），PLUGIN_VERSION 常量在此
 ├── config.toml.example   # 配置模板；实际 config.toml 由 Runner 按 config_model 生成、WebUI 维护，已被 .gitignore 忽略（勿手改 config_version）
-├── webui.json            # 声明式 WebUI 页面（协议版本 1）：1 个工作区大屏 + 6 个侧边栏页，覆盖 /麦麦 命令的展示内容；配套 11 个只读 @API（见 plugin.py，零 actions）；有工作区页面时顶层 workspace_title 必填；主程序 ≥1.3.6 才加载（dialog/when/scope 自此引入），旧版宿主会因声明无效导致整插件注册失败
+├── webui.json            # 声明式 WebUI 页面
+├── docs/
+│   ├── plugin-guide.md   # 插件完全文档：架构/模块参考/数据模型/消息生命周期/关键流程/已知坑，维护与 AI 代理阅读的主地图
+│   ├── webui-extension.md # 声明式 WebUI 设计与交接文档（给前端设计师）
+│   └── webui-development.md # WebUI v2 设计文档（设计师产出）（协议版本 1）：1 个工作区大屏 + 6 个侧边栏页，覆盖 /麦麦 命令的展示内容；配套 11 个只读 @API（见 plugin.py，零 actions）；有工作区页面时顶层 workspace_title 必填；主程序 ≥1.3.6 才加载（dialog/when/scope 自此引入），旧版宿主会因声明无效导致整插件注册失败
 ├── core/
 │   ├── storage.py        # SQLite 存储层（Schema v13、迁移、事务、所有读写）★最关键
 │   ├── llm_service.py    # 统一模型路由 + 结构化 JSON 生成 + Token 统计
