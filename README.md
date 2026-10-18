@@ -258,3 +258,8 @@ python -m playwright install chromium
 ```
 
 `playwright` 是联网搜索的运行依赖，Chromium 安装方法见上方「安装 Chromium」小节。`chinese-calendar`、`lunar-python` 均可离线降级；Pillow 生图链已于 v1.23.0 整体移除，插件不再依赖 Pillow，中文字体仅影响网页截图，缺失不会阻止插件加载。
+
+## 特别感谢
+
+感谢https://github.com/menglimi/astrbot_plugin_private_companion给与我想法
+感谢https://github.com/Blackwindy2333/Message_Debouncing_Refactored这个项目的消息防抖插件，给我的项目某个功能提供思路
