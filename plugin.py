@@ -1,4 +1,4 @@
-"""Mai_life v1.23.1 插件入口。"""
+"""Mai_life v1.23.2 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -48,10 +48,16 @@ _SLEEP_PHASE_ZH={"awake":"清醒","woken":"被叫醒","falling_asleep":"入睡�
 _SCHEDULE_KIND_ZH={"meal":"用餐","work":"工作","study":"学习","travel":"出行",
                    "leisure":"闲暇","sleep":"睡眠","nap":"午休","rest":"休息"}
 
-# ===== 麦麦绘图联动（v1.14.11）=====
+# ===== 麦麦绘图联动（v1.14.11；Tool 通道，按 drawpic 2.1.1 契约核对）=====
 # 联动形态：检测对话中的"生活分享时刻"，在 Planner 决策前注入一次性引导，
-# 由 LLM 自主决定是否调用「麦麦绘图」插件的 draw 工具（该插件无 @API，代码级调用不可行）。
+# 由 LLM 自主决定是否调用「麦麦绘图」插件的 draw 工具。
+# 注意：drawpic 2.1.1 已暴露 16 个 public @API（interfaces/api/ 下 integration/tasks_v2/
+# preferences 三模块，调用方只需 api.call，本 manifest 早已声明），代码级调用可行；
+# 本联动刻意只走 Tool 通道——注入即时、零 RPC、失败由 drawpic 直发会话通知，
+# 不把自己改造成 drawpic 的重型客户端（提交/轮询/取图/授权映射全链路）。
 DRAWPIC_PLUGIN_ID="maimai-drawpic-plugin"
+DRAWPIC_DRAW_TOOL="draw"                # drawpic @Tool 注册名（interfaces/tools/drawing.py:15-22）
+DRAWPIC_DRAW_STATUS_TOOL="draw_status"  # drawpic @Tool 注册名（interfaces/tools/status.py:12-16），仅文案/测试引用
 # 强信号：明确的拍照/分享意图，直接引导。
 _MOMENT_PHOTO_RE=re.compile(r"拍[个张]?照|拍[一二三两]张|照片|自拍|随手拍|拍给你|给你看看?|发给你看|晒一?晒|再拍")
 # 弱信号：日常话题词，需快速模型确认后才引导（无模型时丢弃）。
@@ -62,6 +68,17 @@ MOMENT_HINT_DAILY_MAX=3           # 每用户每日注入上限（两通道共�
 MOMENT_STATE_COOLDOWN_HOURS=12    # 状态触发通道冷却（无对话信号时的低频引导）
 MOMENT_JUDGE_COOLDOWN_MINUTES=60  # 弱信号 LLM 判定冷却
 MOMENT_JUDGE_WINDOW_MAX=2         # 冷却窗口内至多判定次数
+def _tool_definition_names(definitions:list[Any])->set[str]:
+    """从 Planner 工具定义提取工具名：兼容 {"function":{"name":...}}（宿主序列化形态）与平铺 {"name":...}。"""
+    names=set()
+    for item in definitions:
+        if not isinstance(item,dict):continue
+        function=item.get("function")
+        name=str(function.get("name") or "") if isinstance(function,dict) else ""
+        names.add(name or str(item.get("name") or ""))
+    names.discard("")
+    return names
+
 
 def _mood_label(value:float)->str:
     """心情效价值翻译为中文档位，避免用户面对 -1~+1 的裸浮点。"""
@@ -586,13 +603,17 @@ class MaiLifePlugin(MaiBotPlugin):
 
     def _moment_guide_note(self,session:str,payload:dict[str,Any]|None,active:Any,
                            group_passive:bool,kwargs:dict[str,Any])->str:
-        """绘图联动的注入引导：八重守卫全过才注入，注入即消费信号并落频控。"""
+        """绘图联动的注入引导：九重守卫全过才注入，注入即消费信号并落频控。"""
         if not self.config.linkage.drawpic_enabled or self._drawpic_loaded is not True:return ""
         if group_passive or self._is_group_session(session):return ""
         if active is not None:return ""
         tool_definitions=kwargs.get("tool_definitions")
         if not isinstance(tool_definitions,list) or not tool_definitions:return ""  # 空⇔表情包/表达选择/评审子代理轮
-        if not payload:return ""
+        # draw 工具本轮不可见则不引导：_drawpic_loaded 是内存态、维护 tick 复检默认 10 分钟一次
+        # （config.py:493-494），插件中途卸载后的陈旧窗口里工具并不在 tool_definitions 中。
+        # 名字提取兼容 OpenAI function 结构与平铺 name（宿主 resolve_tool_definition_name 同样两种都吃）。
+        if DRAWPIC_DRAW_TOOL not in _tool_definition_names(tool_definitions):return ""
+        if not payload:return ""  # context.enabled=False 或群被动轮不构建 payload（on_planner 构建分支），联动静默不触发
         if str(payload.get("bedtime") or "")=="approaching":return ""  # 睡前氛围期不与道晚安收尾冲突
         runtime=self._session_runtime.get(session) or {}
         signal=str(runtime.get("moment_signal") or "")

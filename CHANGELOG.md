@@ -1,5 +1,24 @@
 # 更新日志
 
+## [1.23.2] - 2026-10-19
+
+### 新增
+
+- **drawpic Tool 名常量与契约断言**：`DRAWPIC_DRAW_TOOL`/`DRAWPIC_DRAW_STATUS_TOOL`（plugin.py:59-60）与 drawpic 2.1.1 注册名逐字对应（`draw`：interfaces/tools/drawing.py:15-22；`draw_status`：interfaces/tools/status.py:12-16），tests/test_fixes.py 新增断言钉住引导文案只引用这两个工具——drawpic 改名时测试先红，不静默漂移。
+
+### 修复
+
+- **注入引导新增「draw 工具本轮可见」守卫**（plugin.py:613-616）：_drawpic_loaded 是 10 分钟一复检的内存态（plugin.py:481、config.py:493-494），插件中途卸载后的陈旧窗口里旧 True 会让引导指向不在本轮 tool_definitions 里的工具；现从 Planner 工具定义提取名字（兼容 OpenAI function 结构与平铺 name，宿主 chat_loop_service.py:1242 同款形态），零 RPC。被拦轮次不写频控记录，不白耗每日 3 次额度。
+- **更正「drawpic 无 @API」过期注释**（plugin.py:51-57）：drawpic 2.1.1 已暴露 16 个 public @API（interfaces/api/ 下 integration 7 个 v1、tasks_v2 6 个、preferences 3 个），调用方只需 api.call（本 manifest 早已声明）；本联动刻意只走 Tool 通道，不改造为重型客户端。
+- **docs/plugin-guide.md drawpic 引用系统性校正**：§11.5 整节重写（行号按 v1.23.1 源码逐条校正并换算改动位移；可见性实为 /麦麦配置 三态文案 plugin.py:1864 而非 /麦麦状态；补记 context.enabled 耦合、第九重守卫与 16 个 public @API 的契约核对）；另校正 :229、:244、:177/:243/:270/:808/:822/:838/:3373、:270/:810、:840（含「绘图联动频控随热更新清理」的不实表述，防抖 burst 同理）、:261 与 :1815（绘图判定 3.2s 引用）、:1973 与 :3558（on_receive 运行态落账）、:2012、:311、:3681、:3683 与配置表行（:730）；AGENTS.md §7/§3 补联动入口与两条隐性耦合。
+
+### 说明
+
+- 检测语义边界不变（已知限制）：component.list_loaded_plugins 只证明插件已加载，不证明版本或绘图平台 Key 已配；未加版本门槛（drawpic 自有 changelog 未记录 draw/draw_status 的引入版本，唯一可核实源码是 2.1.1，设门槛会无据阻断可用旧版），也未加 Key 就绪探测（空模型列表有多因，失败通知由 drawpic 直发、引导文案已要求不重试）。
+- [linkage] hint 改写为诚实描述检测语义（config.py:1175）；WebUI linkage 键集与两张卡片不变（webui.json:2773-2803，test_contract.py:272/508 契约断言守住）。
+- 顺带核对（按方案兜底规则只记不改）：指南另有多处非 drawpic 引用的既存漂移——:229 的 `__init__` 区间、:244 的装配后同步/人格刷新区间、:311 同句的 299/356/424（424 实测并非其所引的睡前误拦注释）、§4.1 维护顺序清单、§11.1 维护时序图第 1/3-9 步、§5.6 注入 mechanics、热更新流程图与生命周期表的多处 `plugin.py` 行号，建议后续做一次全指南行号专项校对。
+- 测试与联调状态：全量测试 542 项通过（1 项环境性跳过，AGENTS.md §1 命令实跑）；部署环境 OneKey 0163381a22cb 无 drawpic 副本，Tool 名与载荷结构以工作区 drawpic 2.1.1 源码与部署宿主 MaiBot v1.3.8 源码为准，mock 验证、未真机联调。
+
 ## [1.23.1] - 2026-10-18
 
 ### 变更

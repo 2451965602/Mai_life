@@ -174,7 +174,7 @@
 7. **失败开放与降级**：`_is_recalled` 存储异常时放行（`plugin.py:843-846`）；模型不可用走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`）。
 8. **热更新期间消息「不增强但放行」**：`_reloading` 标志让所有 Hook 直接 continue（`plugin.py:951` 等）；`on_config_update` 里 `config_data` 已被 SDK 落进 `self.config`，方法开头 `del config_data,version`（`plugin.py:328`），不要自解析传入字典。
 9. **命令 pattern 是单一事实来源**：`_command_pattern_res()` 导入时从 `__maibot_component_info__` 实时收集（`plugin.py:2761-2772`），新增命令必须走 `@Command`，手写派发会被「未识别指令」兜底误伤。
-10. **新服务必须手动加进热更新分发元组**：`plugin.py:338-341`（17 个服务），漏加的症状是「保存配置不生效，重启才好」，没有任何编译期检查会提醒你（v1.14.8 真实事故见 §2.6.3）。
+10. **新服务必须手动加进热更新分发元组**：`plugin.py:345-349`（17 个服务），漏加的症状是「保存配置不生效，重启才好」，没有任何编译期检查会提醒你（v1.14.8 真实事故见 §2.6.3）。
 
 ### 改动前必看的测试
 
@@ -226,7 +226,7 @@
 
 - `config_model = MaiLifeSettings`（`plugin.py:182`）：把强类型配置模型挂到类上，`self.config` 即 `MaiLifeSettings` 实例（定义在 `config.py:1182`）。所有服务共享同一个已校验实例，不存在各服务各持一份字典的情况。
 - `config_reload_subscriptions: ClassVar[Iterable[str]] = ("bot","model")`（`plugin.py:183`）：除插件自身 scope（`self`）外，还订阅主程序 `bot`（角色名/人格）与 `model`（模型路由）两个 scope 的热更新，二者分别走 `on_config_update` 的对应分支（见 §1.6）。
-- `__init__`（`plugin.py:185-219`）只声明运行态，不做任何 I/O：18 个服务属性全部先置 `None`（`plugin.py:188-205`），外加 `_bot_name="麦麦"` 兜底（`plugin.py:195`）、绘图联动内存态（`plugin.py:197-198`）、任务登记表 `_tasks`/`_transient`/`_message_tasks`（`plugin.py:209-210`）、`_maintenance_lock`（`plugin.py:211`）与 `_stopping`/`_reloading` 两个标志（`plugin.py:219`）。
+- `__init__`（`plugin.py:185-219`）只声明运行态，不做任何 I/O：18 个服务属性全部先置 `None`（`plugin.py:188-205`），外加 `_bot_name="麦麦"` 兜底（`plugin.py:195`）、绘图联动内存态（`plugin.py:207-209`）、任务登记表 `_tasks`/`_transient`/`_message_tasks`（`plugin.py:209-210`）、`_maintenance_lock`（`plugin.py:211`）与 `_stopping`/`_reloading` 两个标志（`plugin.py:219`）。
 - `_ready` 属性（`plugin.py:221-226`）：18 个属性（`_store`、`_env`、`_llm`、`_state`、`_schedule`、`_rest`、`_proactive`、`_debouncer`、`_continuity`、`_memory`、`_information`、`_group_observer`、`_relay`、`_bookshelf`、`_creation`、`_admin`、`_recall`、`_bedtime`）全部非 `None` 才算装配完成。**坑：`_command_replies` 不在 `_ready` 清单里**，它另有懒重建路径 `_require_command_replies`（`plugin.py:1749-1753`）——测试/兼容上下文里 logger 缺失也不能挡住命令发送。
 
 `ctx`（Host 能力代理）的挂法分两档：需要 Host RPC 的服务收整个 `ctx`——`LLMService`（`plugin.py:273`）、`ProactiveEngine`（`plugin.py:278`）、`RecallService`（`plugin.py:280`）、`InformationService`（`plugin.py:283`）、`RelayService`（`plugin.py:285`）、`CreationService`（`plugin.py:287`）、`BedtimeManager`（`plugin.py:290`）、`CommandReplyService`（`plugin.py:289`）；纯逻辑服务只收 `self.ctx.logger`（`plugin.py:274-277`、`281-282`、`284`、`288`），`LifeStore` 收 `getattr(self.ctx,"logger",None)`（`plugin.py:267`）以容忍 logger 缺失。这样拆分让不碰 Host 的模块可在缺少 ctx 的环境里单测。
@@ -240,8 +240,8 @@
 3. **Store**：`LifeStore(data_dir, journal_mode="delete", logger=...)` 后立即 `initialize()`（`plugin.py:266-268`）；`journal_mode="delete"` 为回滚日志模式，适配插件热重载频繁的场景（连接模型与崩溃保护详见 §3.1）。随后按开关清理撤回摘要缓存（`plugin.py:269-270`）并恢复中断的创作 claim（`plugin.py:271`）。
 4. **17 个服务**（`plugin.py:273-290`，顺序即依赖顺序）：
    `LLMService`(273) → `EnvironmentService`(274) → `LifeStateEngine`(275) → `ScheduleService`(276) → `RestGate`(277) → `ProactiveEngine`(278) → `MessageDebouncer`(279) → `RecallService`(280) → `ContinuityService`(281) → `MemoryService`(282) → `InformationService`(283) → `GroupObserver`(284) → `RelayService`(285) → `BookshelfService`(286) → `CreationService`(287) → `AdminService`(288) → `CommandReplyService`(289) → `BedtimeManager`(290)。
-   「17 个服务」的权威口径来自 `on_config_update` 的 `scope=="self"` 全量下发清单（`plugin.py:338-341`）：恰好这 17 个（不含 `_store` 与 `_command_replies`）。`_llm` 排第一是因为状态机、日程、闸门、记忆、见闻、创作都要调模型；`_bedtime` 排最后因为它同时依赖 `_env` 与 `_state`（`plugin.py:290`）。
-5. **装配后同步**（`plugin.py:292-297`）：`sync_users` 把配置里的私聊用户档案落库；`_information.prepare()`；`_refresh_personality()` 读 `personality.personality` 与 `bot.nickname`（`plugin.py:528-534`）并经 `_apply_bot_name` 分发给七个会写提示词的服务（`plugin.py:536-545`）；`_resolve_all_streams()` 为没有 `stream_id` 的用户解析私聊流（`plugin.py:685-690`）；`_llm.refresh_health()`；`_check_drawpic()` 探测麦麦绘图插件是否已注册（`plugin.py:547-560`）。
+   「17 个服务」的权威口径来自 `on_config_update` 的 `scope=="self"` 全量下发清单（`plugin.py:345-349`）：恰好这 17 个（不含 `_store` 与 `_command_replies`）。`_llm` 排第一是因为状态机、日程、闸门、记忆、见闻、创作都要调模型；`_bedtime` 排最后因为它同时依赖 `_env` 与 `_state`（`plugin.py:290`）。
+5. **装配后同步**（`plugin.py:292-297`）：`sync_users` 把配置里的私聊用户档案落库；`_information.prepare()`；`_refresh_personality()` 读 `personality.personality` 与 `bot.nickname`（`plugin.py:528-534`）并经 `_apply_bot_name` 分发给七个会写提示词的服务（`plugin.py:536-545`）；`_resolve_all_streams()` 为没有 `stream_id` 的用户解析私聊流（`plugin.py:685-690`）；`_llm.refresh_health()`；`_check_drawpic()` 探测麦麦绘图插件是否已注册（`plugin.py:554-567`）。
 6. **条件启动**（`plugin.py:298-300`）：仅当 `config.plugin.enabled` 为真才跑一次离线维护 tick（`allow_weather_network=False`，启动不打网）、启动后台循环、并补一个强制刷天气的临时任务。**坑：插件以关闭态发布时，`on_load` 不建任何循环**，要等一次配置热更新才恢复调度（`plugin.py:355-358`）。
 
 ### 1.5 全部 Hook 注册点（7 个）与各自职责
@@ -258,7 +258,7 @@
 | 6 | `send_service.before_send` | `on_send_before`（`plugin.py:1447`） | `BLOCKING` | 平台发送前最后复核：撤回墓碑、候选有效性、任务发送权。§5.9 |
 | 7 | `send_service.after_send` | `on_send_after`（`plugin.py:1539`） | `OBSERVE` | 以平台实际结果收口：唤醒、主动额度、契机归还。§5.9 |
 
-**为什么这样分模式**：只有需要改载荷或阻止流程的点用 `BLOCKING`（1、2、4、5、6）；纯观察/记账的点用 `OBSERVE`（3、7），失败不影响主链。`on_receive` 额外声明 `order=EARLY` 与 `timeout_ms=30000`——它是收口与防抖的发生地，30 秒预算内要完成合并等待外的全部本地判定（`plugin.py:936`；绘图判定的 3.2s 子预算见 `plugin.py:585-589`）。`on_replyer_after` 到 `on_send_before` 之间存在 await 间隙，代码在交接处**反复复核**撤回/取消状态（`plugin.py:1520`、`1531`），因为真实入站可能在此期间取消旧轮次。
+**为什么这样分模式**：只有需要改载荷或阻止流程的点用 `BLOCKING`（1、2、4、5、6）；纯观察/记账的点用 `OBSERVE`（3、7），失败不影响主链。`on_receive` 额外声明 `order=EARLY` 与 `timeout_ms=30000`——它是收口与防抖的发生地，30 秒预算内要完成合并等待外的全部本地判定（`plugin.py:936`；绘图判定的 3.2s 子预算见 `plugin.py:592-596`）。`on_replyer_after` 到 `on_send_before` 之间存在 await 间隙，代码在交接处**反复复核**撤回/取消状态（`plugin.py:1520`、`1531`），因为真实入站可能在此期间取消旧轮次。
 
 ### 1.6 生命周期：`on_load` / `on_unload` / `on_config_update`
 
@@ -267,7 +267,7 @@
 - **`_apply_config_update`（`plugin.py:326-359`）**：先停调度，再按 scope 分发，最后按新开关恢复：
   - 入参 `config_data` 与 `version` 被显式 `del`（`plugin.py:328`）——**不要试图自己解析 `config_data`**，此时 `self.config` 已是新实例；
   - 保留 `_active_tasks` 登记表（只更新 retention），注释 `plugin.py:330` 说明 WebUI 每次保存都重置会让进行中的任务失去归因；
-  - `scope=="self"`：17 个服务逐个 `update_config(self.config)`（`plugin.py:337-342`，与 §1.4 装配名单一致），并联动清理撤回摘要缓存、`sync_users`、`_information.prepare()`、`_check_drawpic()`，按启用用户裁剪 `_session_runtime`（`plugin.py:343-351`）；
+  - `scope=="self"`：17 个服务逐个 `update_config(self.config)`（`plugin.py:345-349`，与 §1.4 装配名单一致），并联动清理撤回摘要缓存、`sync_users`、`_information.prepare()`、`_check_drawpic()`，按启用用户裁剪 `_session_runtime`（`plugin.py:356-358`）；
   - `scope=="bot"`：只刷人格与角色名（`plugin.py:352`）；
   - `scope in {"self","model"}`：只刷模型健康（`plugin.py:353`）；
   - 收尾一律 `_resolve_all_streams()`，并在启用时重跑离线维护 tick、重启六类循环、补刷天气（`plugin.py:354-358`；`bot`/`model` scope 不强制刷天气）。
@@ -308,7 +308,7 @@
 | `_information_loop`（`plugin.py:439-454`） | 启用时 60 秒，禁用时 300 秒空转（`plugin.py:442-443`） | 联网见闻巡检：新闻/探索/搜索历史，可把主人的未决话题并进检索（`plugin.py:447-451`）。 |
 | `_creation_loop`（`plugin.py:456-466`） | 启用时 `creation.patrol_interval_minutes`（默认 60 分钟，`config.py:380-382`），禁用时 300 秒空转（`plugin.py:459-461`） | 书柜创作巡检，只在空档判断是否动笔。 |
 
-`_maintenance_tick`（`plugin.py:468-494`）本体由 `_maintenance_lock` 串行化，顺序即语义：刷天气（启动/热更新时 `allow_weather_network=False` 不打网，`plugin.py:299`、`356`）→ 绘图插件复检 → 日程 `ensure_day`/`expand_due` → **先跑 `BedtimeManager.tick` 再推进相位**（注释 `plugin.py:482`：静默刚达标时先更新 defer/回睡，`advance` 才不会按旧值提前睡过去）→ 按日程边界切片离线推进 `advance_timeline` → 逐小时状态快照（`INSERT OR IGNORE` 每小时一条）→ 记忆日记 → `_settle_relationships` 按自然日补算关系（最多回看一年，`plugin.py:496-520`）→ 清理运行记录（`RECORD_RETENTION_DAYS` 来自 `core/storage.py:22`，`plugin.py:22`、`491-494`）。**两个循环都碰睡前状态但周期不同（60s vs 10min），是刻意设计而非疏漏**；把 bedtime 合并进 maintenance tick 会引入注释 `plugin.py:424` 描述的误拦。完整时序见 §11.1。
+`_maintenance_tick`（`plugin.py:475-501`）本体由 `_maintenance_lock` 串行化，顺序即语义：刷天气（启动/热更新时 `allow_weather_network=False` 不打网，`plugin.py:299`、`356`）→ 绘图插件复检 → 日程 `ensure_day`/`expand_due` → **先跑 `BedtimeManager.tick` 再推进相位**（注释 `plugin.py:489`：静默刚达标时先更新 defer/回睡，`advance` 才不会按旧值提前睡过去）→ 按日程边界切片离线推进 `advance_timeline` → 逐小时状态快照（`INSERT OR IGNORE` 每小时一条）→ 记忆日记 → `_settle_relationships` 按自然日补算关系（最多回看一年，`plugin.py:503` 起）→ 清理运行记录（`RECORD_RETENTION_DAYS` 来自 `core/storage.py:22`，`plugin.py:22`、`498-501`）。**两个循环都碰睡前状态但周期不同（60s vs 10min），是刻意设计而非疏漏**；把 bedtime 合并进 maintenance tick 会引入注释 `plugin.py:424` 描述的误拦。完整时序见 §11.1。
 
 ### 1.10 依赖与降级：`requirements.txt`
 
@@ -727,7 +727,7 @@ for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']):
 
 | 字段 | 默认值 | 语义 |
 | --- | --- | --- |
-| `drawpic_enabled` | `false` | 麦麦绘图联动；需已安装 `maimai-drawpic-plugin` 且配好至少一个平台 Key，未安装时开关不生效（`config.py:1170-1179`、`plugin.py:60`、`547-560`；联动时序见 §11.5） |
+| `drawpic_enabled` | `false` | 麦麦绘图联动；需已安装 `maimai-drawpic-plugin` 且配好至少一个平台 Key（检测仅确认插件已加载，不校验版本与 Key；注入另需 draw 工具对当前对话可见），未安装或工具不可见时不生效（`config.py:1170-1179`、`plugin.py:58`、`554-567`；联动时序见 §11.5） |
 
 ### 2.4 `CONFIG_SCHEMA_VERSION` 与配置迁移
 
@@ -805,9 +805,9 @@ WebUI 保存配置
       → _apply_config_update(scope, ...)                          plugin.py:326-359
           1. await self._stop_tasks()                              plugin.py:329
           2. 刷新 ActiveTaskRegistry 保留期、清运行态字典            plugin.py:331-334
-          3. scope=="self"：17 个服务逐个 update_config(self.config) plugin.py:337-342
+          3. scope=="self"：17 个服务逐个 update_config(self.config) plugin.py:345-349
              附带的 store 级动作（清撤回摘要 / sync_users /
-             information.prepare / drawpic 检测 / session_runtime 过滤）plugin.py:343-351
+             information.prepare / drawpic 检测 / session_runtime 过滤）plugin.py:356-358
           4. scope=="bot"：刷新人格与角色名并分发给各服务           plugin.py:352、528-545
           5. scope in {"self","model"}：llm.refresh_health()       plugin.py:353
           6. _resolve_all_streams()                                plugin.py:354
@@ -819,7 +819,7 @@ WebUI 保存配置
 
 #### 2.6.2 分发名单与三种 `update_config` 形态
 
-`scope=="self"` 时分发 17 个服务，名单与 §1.4 的装配顺序完全一致（`plugin.py:337-342`）。各服务实现分三类：
+`scope=="self"` 时分发 17 个服务，名单与 §1.4 的装配顺序完全一致（`plugin.py:345-349`）。各服务实现分三类：
 
 1. **纯换引用**（大多数）：`update_config(config)` 就是 `self.config = config`，如 `core/llm_service.py:21-22`、`life/rest_gate.py:17`、`life/proactive.py:14`、`life/life_state.py:43`、`life/schedule_service.py:65`、`life/continuity.py:13`、`life/memory_service.py:27`、`messaging/recall_service.py:35`、`messaging/message_pipeline.py:145`、`social/group_observer.py:37`、`social/relay_service.py:18`、`creation/bookshelf_service.py:16`、`creation/inspiration_service.py:18`、`information/news_service.py:21`、`management/admin_service.py:49`。
 2. **链式转发**：`InformationService` 转发给 `SearchService`+`NewsService`（`information/information_service.py:33-34`）；`CreationService` 转发给 `InspirationService`（`creation/creation_service.py:42-43`）。这两个是聚合服务，子服务不在插件分发名单里，靠父服务代发。
@@ -835,9 +835,9 @@ WebUI 保存配置
 
 **容易踩的坑**：
 
-1. **新增服务必须手动加进 `plugin.py:338-341` 的分发元组**——漏加的症状是"保存配置不生效，重启才好"，且没有任何编译期或启动期检查会提醒你（历史事故见上）。
+1. **新增服务必须手动加进 `plugin.py:345-349` 的分发元组**——漏加的症状是"保存配置不生效，重启才好"，且没有任何编译期或启动期检查会提醒你（历史事故见上）。
 2. `_command_replies`、`_prompts`（PromptBuilder）不在名单里，因为它们的构造不依赖 `MaiLifeSettings`（`plugin.py:201`、`281`）；给它们加配置依赖时别忘了同步加分发。
-3. 内存运行态不会被 `update_config` 清空：防抖 burst、绘图联动频控、群轮次表等由 `_apply_config_update` 显式清理（`plugin.py:332-334`），新增运行态字典时要评估是否加入清理，否则热更新后可能串轮次。
+3. 内存运行态不会被 `update_config` 清空：群轮次表等由 `_apply_config_update` 显式清理（`plugin.py:339-341`），但绘图联动频控（`_moment_hints`/`_moment_judges`）与防抖 burst 都不在其列——前者只在 `on_unload`（`plugin.py:322`）清空，后者 `update_config` 只替换 config（`messaging/message_pipeline.py:145`），热更新路径（`plugin.py:333-358`）两者都不清；新增运行态字典时要评估是否加入清理，否则热更新后可能串轮次。
 4. `scope=="bot"` 只刷人格/角色名，不动插件配置；角色名通过 `set_bot_name`/`set_personality` 单独分发（`plugin.py:536-545`），与 `update_config` 是两条并行通道。
 
 ### 2.7 设计理由与容易踩的坑（汇总）
@@ -1812,7 +1812,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 
 **为什么这样设计**：命令路径完全不进防抖、不进闸门、不写运行态——命令是确定性的，不该被 1.2 秒静默窗拖延，也不该被夜间闸门拦掉。
 
-**容易踩的坑**：`on_receive` 的 `HookHandler` 是 `mode=BLOCKING, order=EARLY, timeout_ms=30000`（`plugin.py:936`）。整条私聊管线（含防抖等待、闸门 LLM 判醒、生活分享判定的 3.2s 超时）都在这 30 秒预算内。`_detect_moment_signal` 的 3.2s 硬超时（`plugin.py:585-589`）就是为这条预算服务的（注释见 `plugin.py:566-567`）。新增任何 await 都要先算进这 30 秒。
+**容易踩的坑**：`on_receive` 的 `HookHandler` 是 `mode=BLOCKING, order=EARLY, timeout_ms=30000`（`plugin.py:936`）。整条私聊管线（含防抖等待、闸门 LLM 判醒、生活分享判定的 3.2s 超时）都在这 30 秒预算内。`_detect_moment_signal` 的 3.2s 硬超时（`plugin.py:592-596`）就是为这条预算服务的（注释见 `plugin.py:572-573`）。新增任何 await 都要先算进这 30 秒。
 
 ### 5.3 防抖收口 `MessageDebouncer`
 
@@ -1970,7 +1970,7 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 11. 后台任务：`continuity.refresh`、`memory.observe_message`，都用 `message_keys` 绑定来源消息（`plugin.py:1084-1090`）
 12. **休息闸门** `self._rest.decide(...)`（`plugin.py:1093`）
 13. 闸门阻断时：非 `BLOCK_REASON` 才写 `add_rest_backlog`（`plugin.py:1096-1101`），然后 `abort`
-14. 写入 `_session_runtime[session]`、`_cancel_reply_confirmations(session)`、`_active_tasks.note_inbound(session)` + `_supersede_active_task`（`plugin.py:1106-1117`）
+14. 写入 `_session_runtime[session]`、`_cancel_reply_confirmations(session)`、`_active_tasks.note_inbound(session)` + `_supersede_active_task`（`plugin.py:1117-1131`）
 
 **为什么「运行态最后才写」**：注释在 `plugin.py:1106-1107`——只有真正进入主链的消息才写运行态、取消上一轮待发送内容并取代旧主动任务归因；被闸门阻断/命令/未配置用户的消息不写，避免「急事回复被静默丢弃」与醒来提交错归因。
 
@@ -2009,7 +2009,7 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 6. `self._relay.prompt_context(session, task_id)` —— 转述边界
 7. `self._moment_guide_note(...)` —— 麦麦绘图联动引导
 
-**为什么第 7 项要单独追加**：注释在 `plugin.py:1273`——它是独立 suffix，**不受 `_clip(4000)` 截断影响**。生活背景被截断时绘图引导仍能完整送达。
+**为什么第 7 项要单独追加**：注释在 `plugin.py:1284-1285`——它是独立 suffix，**不受 `_clip(4000)` 截断影响**。生活背景被截断时绘图引导仍能完整送达。
 
 **为什么第 4 项要改写最后一条用户消息**：`plugin.py:1258-1265` 注释——避免 Replyer 输出被取消后 Host 把空回复当成失败而进入「思考-取消-再思考」循环。改写动作由 `_neutralize_recalled_latest_payload`（`plugin.py:1219-1235`）完成，同时兼容 `items`（1.2.0+）和 `messages`（旧版）两种载荷。
 
@@ -3370,7 +3370,7 @@ WebUI 页面与私有 API 唯一的共享代码是 `AdminService.snapshot()`：`
 
 `management/` 只有两个文件：`__init__.py` 导出 `AdminService`（`management/__init__.py:1-5`），实体全在 `management/admin_service.py`（197 行）。模块 docstring 即设计目标：「不暴露聊天原文和原始 API Key 的结构化管理摘要」（`management/admin_service.py:1`）。
 
-`AdminService` 是无状态的聚合层：`__init__` 只持有 `store` 与 `config` 两个引用（`management/admin_service.py:48`），`update_config` 在配置热更新时替换 config 实例（`management/admin_service.py:49`）。它在 `on_load` 中创建（`plugin.py:288`），并在 `on_config_update` 的 `scope=="self"` 分支随其余服务一起收到新配置（`plugin.py:337-342`）。
+`AdminService` 是无状态的聚合层：`__init__` 只持有 `store` 与 `config` 两个引用（`management/admin_service.py:48`），`update_config` 在配置热更新时替换 config 实例（`management/admin_service.py:49`）。它在 `on_load` 中创建（`plugin.py:288`），并在 `on_config_update` 的 `scope=="self"` 分支随其余服务一起收到新配置（`plugin.py:345-349`）。
 
 #### 九个 scope 与两条出口
 
@@ -3555,7 +3555,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 | 4 | 合并后登记 | `plugin.py:1071-1076` | 重取身份、`register_turn(merged)`、`_discard_recalled_private_turn` | 已撤回 → abort |
 | 5 | 互动与观察 | `plugin.py:1078-1090` | `record_interaction`（纯空消息不写）；spawn `continuity.refresh` 与 `memory.observe_message`（与来源消息绑定，支持撤回取消） | 后台任务异常只进日志 |
 | 6 | 休息闸门 | `plugin.py:1093` `RestGate.decide` | 时间窗 OR 日程类型触发；概率/LLM 判醒；建待醒候选（§4.7） | 阻断 → 非 `BLOCK_REASON` 写 `rest_backlogs` 后 abort |
-| 7 | 运行态落账 | `plugin.py:1106-1117` | `_detect_moment_signal`（3.2s 预算，§11.5）；写 `_session_runtime`；`_cancel_reply_confirmations`；`note_inbound` + `_supersede_active_task`（真实入站优先于未发送的主动轮） | 命令/阻断/未配置用户不写 |
+| 7 | 运行态落账 | `plugin.py:1117-1131` | `_detect_moment_signal`（3.2s 预算，§11.5）；写 `_session_runtime`；`_cancel_reply_confirmations`；`note_inbound` + `_supersede_active_task`（真实入站优先于未发送的主动轮） | 命令/阻断/未配置用户不写 |
 | 8 | Planner 注入 | `plugin.py:1237` `on_planner` | `_activate_planner_task` 映射虚拟任务（`plugin.py:707-754`）；suffix 七项按序拼接（`plugin.py:1245-1274`）；写入 `items`/`messages`（§5.6） | 群被动轮跳过私聊背景 |
 | 9 | Planner 记账 | `plugin.py:1278` `on_planner_after` | OBSERVE，`record_observed(source="host_planner")` | 异常不影响主链 |
 | 10 | Replyer 注入 | `plugin.py:1288` `on_replyer` | 群轮次命中则不注入私聊背景（`plugin.py:1294-1296`）；`_prompt_payload(consume_backlog=True)`（此刻才消费休息积压）；写 `extra_prompt`（`plugin.py:1312`） | — |
@@ -3678,9 +3678,9 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
     → ScheduleService.ensure_day(force=True)：重生成当日框架（§4.5）
 
 每 10 分钟（state.tick_interval_minutes，config.py:493-496）
-  _maintenance_loop → _maintenance_tick（plugin.py:468-494，_maintenance_lock 串行化）
+  _maintenance_loop → _maintenance_tick（plugin.py:475-501，_maintenance_lock 串行化）
     1. 刷天气（启动/热更新时 allow_network=False 不打网，plugin.py:299、356）
-    2. 绘图插件复检（仅 drawpic_enabled，plugin.py:474）
+    2. 绘图插件复检（仅 drawpic_enabled，plugin.py:481）
     3. ensure_day（缺当日日程才生成）+ expand_due 细化临近场景（plugin.py:476-479）
     4. BedtimeManager.tick —— 先于相位推进（plugin.py:483，理由见 §11.2）
     5. state_timeline 按日程边界切片 → advance_timeline 逐段推进（plugin.py:485-486，§4.3）
@@ -3772,31 +3772,45 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
 绘图联动是唯一「本插件引导模型调用另一个插件工具」的链路，全部状态在进程内存：
 
 ```
-on_load / 配置热更新 / 维护 tick（plugin.py:295、348、474）
-  → _check_drawpic（plugin.py:547-560）：
-      ctx.component.list_loaded_plugins 查 DRAWPIC_PLUGIN_ID="maimai-drawpic-plugin"（plugin.py:60）
-      异常只告警一次并按未安装处理（plugin.py:556-558）；结果存 _drawpic_loaded
+on_load / 配置热更新 / 维护 tick（plugin.py:304、355、481）
+  → _check_drawpic（plugin.py:554-567）：
+      ctx.component.list_loaded_plugins 查 DRAWPIC_PLUGIN_ID="maimai-drawpic-plugin"（plugin.py:58）
+      异常只告警一次并按未安装处理（plugin.py:563-565）；结果存 _drawpic_loaded
+      语义边界：只证明插件已加载，不证明版本或绘图平台 Key 已配（宿主该能力只回插件 ID 列表）
 
-私聊消息进入主链后（闸门放行之后，plugin.py:1108）
-  → _detect_moment_signal（plugin.py:562-595）：
-      _MOMENT_PHOTO_RE 命中 → "photo" 强信号（plugin.py:570）
-      _MOMENT_LIFE_WORDS 命中 → 弱信号，需 drawpic 已安装 + relevance 任务可用（plugin.py:571-573）
-      → LLM 判定「是否自然贴题」，3.2s 硬超时（plugin.py:585-589，为 on_receive 30s 预算服务）
-      → 判定冷却：60 分钟内最多 2 次（plugin.py:66-70 常量、574-578）
-  结果写 _session_runtime[session]["moment_signal"]（plugin.py:1112）
+私聊消息进入主链后（闸门放行之后，plugin.py:1119）
+  → _detect_moment_signal（plugin.py:569-602）：
+      _MOMENT_PHOTO_RE 命中 → "photo" 强信号（plugin.py:577）
+      _MOMENT_LIFE_WORDS 命中 → 弱信号，需 drawpic 已安装 + relevance 任务可用（plugin.py:578-580）
+      → LLM 判定「是否自然贴题」，3.2s 硬超时（plugin.py:592-596，为 on_receive 30s 预算服务）
+      → 判定冷却：60 分钟内最多 2 次（plugin.py:66-70 常量、582-585）
+  结果写 _session_runtime[session]["moment_signal"]（plugin.py:1123）
 
-Planner 请求前（on_planner，plugin.py:1273-1274）
-  → _moment_guide_note（plugin.py:597-649）：八重守卫全过才注入——
+Planner 请求前（on_planner，plugin.py:1284-1285）
+  → _moment_guide_note（plugin.py:604-660）：九重守卫全过才注入——
       drawpic 开关+已检测、非群会话、无 active 任务、tool_definitions 非空（空⇔表情包/评审轮）、
-      payload 非空、非睡前氛围期、段型非 sleep/nap、频控（对话通道 2h / 状态通道 12h / 每日 3 次）
-  → 注入「生活分享时刻」引导（独立 suffix，不受 _clip(4000) 截断，plugin.py:1273 注释）
-  → 注入即消费信号（plugin.py:645-646），防同一信号重复注入
+      draw 工具在本轮工具定义里可见（plugin.py:613-616；关闭检测陈旧窗口：_drawpic_loaded 最多
+      10 分钟才复检，插件中途卸载后旧 True 会让引导指向一个不存在的工具；名字提取兼容 OpenAI function
+      结构与平铺 name，对应宿主 chat_loop_service.py:1242 的序列化形态）、
+      payload 非空（context.enabled=False 或群被动轮不构建 payload，on_planner 构建分支
+      plugin.py:1255-1257，联动静默不触发）、非睡前氛围期、段型非 sleep/nap、
+      频控（对话通道 2h / 状态通道 12h / 每日 3 次；被守卫拦下的轮次不写频控记录）
+  → 注入「生活分享时刻」引导（独立 suffix，不受 _clip(4000) 截断，plugin.py:1284 注释）
+  → 注入即消费信号（plugin.py:656-657），防同一信号重复注入
 
 模型自行决定调用 draw 工具 → 麦麦绘图插件后台生成并自动发进会话（引导文案明确要求
-  不要轮询 draw_status、失败不重试，plugin.py:635-636、643-644）
+  不要轮询 draw_status、失败不重试，plugin.py:641-655）
 ```
 
-可见性：`/麦麦状态` 显示「开启（已检测到/未检测到）/关闭」（`plugin.py:2004`）；WebUI `linkage` 段给 `drawpic_enabled`/`drawpic_detected`（`plugin.py:2241-2242`、`2594-2595`）。**为什么检测结果是内存态**：注释 `plugin.py:196`——重启丢失可接受，下次 tick 会复检。
+契约核对（v1.23.2，按 drawpic 2.1.1 源码逐字）：引导文案只引用 drawpic 已注册的 Tool 名
+（draw：interfaces/tools/drawing.py:15-22；draw_status：interfaces/tools/status.py:12-16），
+由 DRAWPIC_DRAW_TOOL / DRAWPIC_DRAW_STATUS_TOOL 常量与 tests/test_fixes.py 两条断言钉住。
+drawpic 2.1.1 另有 16 个 public @API（interfaces/api/ 下 integration/tasks_v2/preferences），
+本联动刻意不走 API 通道（plugin.py:51-57 注释）：注入即时、零 RPC、失败由 drawpic 直发会话通知。
+
+可见性：`/麦麦配置` 显示「开启（已检测到/未检测到）/关闭」（plugin.py:1864）；WebUI `linkage`
+段给 drawpic_enabled / drawpic_detected（plugin.py:2079-2080、2432-2433）。
+**为什么检测结果是内存态**：注释 plugin.py:207——重启丢失可接受，下次 tick 会复检。
 
 ---
 

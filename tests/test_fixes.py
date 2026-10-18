@@ -2569,6 +2569,8 @@ class V1149FestivalTests(unittest.TestCase):
 
 from Mai_life.messaging.task_context import ActivePluginTask
 from Mai_life.plugin import (
+    DRAWPIC_DRAW_TOOL,
+    DRAWPIC_DRAW_STATUS_TOOL,
     DRAWPIC_PLUGIN_ID,
     MOMENT_HINT_COOLDOWN_HOURS,
     MOMENT_HINT_DAILY_MAX,
@@ -2806,6 +2808,30 @@ class V11411GuideNoteTests(unittest.IsolatedAsyncioTestCase):
         note = plugin._moment_guide_note(session, self._payload(), None, False, kwargs)
         self.assertIn("【生活分享时刻】", note)
 
+    async def test_guide_note_requires_draw_tool_visible_in_round(self):
+        # 第九重守卫：draw 工具不在本轮 tool_definitions 里就不引导。_drawpic_loaded 是
+        # 最多 10 分钟才随维护 tick 复检的内存态，插件中途卸载后的陈旧窗口里，
+        # 工具并不在本轮 Planner 工具定义中，引导会指向一个不存在的工具。
+        # 宿主真实载荷是 OpenAI function 结构（chat_loop_service.py:1242 序列化），
+        # 名字提取同时兼容 function 结构与平铺 name；被拦轮次不写频控记录，
+        # 不白耗每日 3 次额度。
+        plugin = await self._plugin()
+        session = self._armed(plugin, "photo")
+        no_draw = {"tool_definitions": [{"type": "function", "function": {
+            "name": "mai_life_browse_web", "description": "x", "parameters": {}}}]}
+        self.assertEqual(plugin._moment_guide_note(session, self._payload(), None, False, no_draw), "")
+        self.assertFalse(plugin._moment_hints.get("10001"))
+        with_draw = {"tool_definitions": [{"type": "function", "function": {
+            "name": "draw", "description": "x", "parameters": {}}}]}
+        self.assertIn("【生活分享时刻】",
+                      plugin._moment_guide_note(session, self._payload(), None, False, with_draw))
+        _rewind_moment_clock(plugin, "10001", MOMENT_HINT_COOLDOWN_HOURS * 3600 + 300)
+        mixed = {"tool_definitions": [{"name": "mai_life_browse_web"},
+                                      {"type": "function", "function": {"name": "draw"}}]}
+        self._armed(plugin, "photo")
+        self.assertIn("【生活分享时刻】",
+                      plugin._moment_guide_note(session, self._payload(), None, False, mixed))
+
     async def test_conversation_note_keywords_and_one_shot_consumption(self):
         plugin = await self._plugin()
         session = self._armed(plugin, "life")
@@ -2820,6 +2846,21 @@ class V11411GuideNoteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plugin._moment_hints.get("10001"))
         again = plugin._moment_guide_note(session, self._payload(), None, False, self._kwargs())
         self.assertNotIn("【生活分享时刻】", again)
+
+    async def test_note_tool_references_match_drawpic_registered_tools(self):
+        # drawpic 2.1.1 注册 5 个 Tool：draw/edit_image/draw_status/draw_styles/styled_draw
+        # （interfaces/tools/drawing.py:15-22、drawing.py:65-73、status.py:12-16、
+        # styles.py:19-27、styles.py:49-58，本次逐条读码核实）；引导文案只许引用
+        # draw 与 draw_status。常量与注册名逐字对应——drawpic 改名时这两条断言先红。
+        self.assertEqual(DRAWPIC_DRAW_TOOL, "draw")
+        self.assertEqual(DRAWPIC_DRAW_STATUS_TOOL, "draw_status")
+        plugin = await self._plugin()
+        session = self._armed(plugin, "photo")
+        note = plugin._moment_guide_note(session, self._payload(), None, False, self._kwargs())
+        self.assertIn(f"「麦麦绘图」插件的 {DRAWPIC_DRAW_TOOL} 工具", note)
+        self.assertIn(DRAWPIC_DRAW_STATUS_TOOL, note)
+        self.assertNotIn("edit_image", note)
+        self.assertNotIn("styled_draw", note)
 
     async def test_hint_frequency_cooldown_daily_max_and_cross_day_reset(self):
         plugin = await self._plugin()
