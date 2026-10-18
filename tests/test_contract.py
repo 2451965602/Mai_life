@@ -29,7 +29,7 @@ class ContractTests(unittest.TestCase):
         manifest=json.loads((root/"_manifest.json").read_text(encoding="utf-8-sig"))
         requirements=(root/"requirements.txt").read_text(encoding="utf-8")
         readme=(root/"README.md").read_text(encoding="utf-8")
-        self.assertEqual(manifest["version"],"1.22.1")
+        self.assertEqual(manifest["version"],"1.23.0")
         self.assertIn("playwright>=1.49,<2",requirements)
         self.assertIn("python -m playwright install chromium",readme)
         self.assertIn("Playwright/Bing",readme)
@@ -38,20 +38,18 @@ class ContractTests(unittest.TestCase):
         from Mai_life.config import PLUGIN_VERSION
         from Mai_life.information.http_client import _USER_AGENT
         root=Path(__file__).parents[1]
-        self.assertEqual(PLUGIN_VERSION,"1.22.1")
+        self.assertEqual(PLUGIN_VERSION,"1.23.0")
         self.assertIn(f"Mai_life/{PLUGIN_VERSION}",_USER_AGENT)
         self.assertNotIn("1.9.2",_USER_AGENT)
-        # 菜单、管理概览与入口的显示版本必须统一为 1.22.1，不允许残留旧版本号。
-        for relative in ("plugin.py","management/admin_service.py","messaging/menu_renderer.py",
+        # 管理概览与入口的显示版本必须统一为 1.23.0，不允许残留旧版本号。
+        for relative in ("plugin.py","management/admin_service.py",
                          "information/http_client.py","core/environment.py","config.py",
                          "README.md","_manifest.json"):
             text=(root/relative).read_text(encoding="utf-8-sig",errors="replace")
             self.assertNotIn("1.9.2",text,msg=f"{relative} 仍残留旧版本号 1.9.2")
-        # 菜单与管理概览通过 PLUGIN_VERSION 常量渲染版本，避免出现多处硬编码。
+        # 管理概览通过 PLUGIN_VERSION 常量渲染版本，避免出现多处硬编码。
         admin_text=(root/"management/admin_service.py").read_text(encoding="utf-8-sig",errors="replace")
-        menu_text=(root/"messaging/menu_renderer.py").read_text(encoding="utf-8-sig",errors="replace")
         self.assertIn("PLUGIN_VERSION",admin_text)
-        self.assertIn("PLUGIN_VERSION",menu_text)
 
     def test_default_toml_validates(self):
         root=Path(__file__).parents[1]
@@ -100,7 +98,7 @@ class ContractTests(unittest.TestCase):
     def test_sdk_components_registered(self):
         plugin=MaiLifePlugin(); components=plugin.get_components()
         names={str(item.get("name") or "") for item in components}
-        for expected in {"/麦麦","/麦麦帮助","/麦麦状态","/麦麦日程","/麦麦关系","/麦麦撤回","/麦麦日记","/麦麦日期","/麦麦新闻","/麦麦探索","/麦麦转述","/麦麦书柜","/麦麦阅读","/麦麦立即创作","/麦麦管理","mai_life_web_search","get_life_state","get_current_scene","admin_snapshot","mai_life_management",*WEBUI_API_NAMES}:
+        for expected in {"/麦麦","/麦麦帮助","/麦麦状态","/麦麦配置","/麦麦休息测试","/麦麦添加日期","/麦麦删除日期","/麦麦确认日期","/麦麦立即创作","/麦麦转述","/麦麦重生日程","mai_life_web_search","get_life_state","get_current_scene","admin_snapshot","mai_life_management",*WEBUI_API_NAMES}:
             self.assertIn(expected,names)
         self.assertFalse(any(name.startswith("/mai") for name in names))
         self.assertNotIn("/麦麦技能",names)

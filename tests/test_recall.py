@@ -218,19 +218,13 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
         result=await restored.on_send_before(message={"session_id":"private-1"},reply_message_id="older-quote")
         self.assertEqual(result["action"],"abort")
 
-    async def test_recall_query_command_is_private_and_cache_off_never_guesses(self):
+    async def test_recall_query_is_private_and_cache_off_never_guesses(self):
+        # v1.23.0：/麦麦撤回 已删，命令层调用段移除；缓存关闭不猜内容的契约由服务层断言承接。
         self.config.users.profiles=[UserProfile(user_id="1")]
         await self.store.sync_users(self.config.users.profiles); await self.store.set_user_stream("1","private-1")
         service=RecallService(self.ctx,self.store,self.config,DummyLogger())
         prompt=await service.query_prompt_context("private-1","1")
         self.assertIn("没有保存撤回内容",prompt); self.assertIn("不得",prompt)
-        plugin=MaiLifePlugin(); plugin._set_context(self.ctx)
-        plugin.set_plugin_config(self.config.model_dump(mode="python")); plugin._store=self.store; plugin._recall=service
-        result=await plugin.cmd_recalled(user_id="1",stream_id="private-1",group_id="")
-        self.assertEqual(len(result),3); self.assertEqual(result[2],2)
-        self.assertIn("不会保存你撤回的内容",self.ctx.send.messages[-1]["text"])
-        await plugin.cmd_recalled(user_id="1",stream_id="group-100",group_id="100")
-        self.assertIn("私聊用户或私聊管理员",self.ctx.send.messages[-1]["text"])
 
     async def test_one_switch_handles_private_and_group_notices(self):
         await self.store.sync_users([UserProfile(user_id="1")])

@@ -20,7 +20,7 @@
   - [1.4 `on_load`：装配顺序（1 Store + 17 服务 + 命令发送层）](#14-on_load装配顺序1-store--17-服务--命令发送层)
   - [1.5 全部 Hook 注册点（7 个）与各自职责](#15-全部-hook-注册点7-个与各自职责)
   - [1.6 生命周期：`on_load` / `on_unload` / `on_config_update`](#16-生命周期on_load--on_unload--on_config_update)
-  - [1.7 命令注册形态：22 个 `@Command`](#17-命令注册形态22-个-command)
+  - [1.7 命令注册形态：11 个 `@Command`](#17-命令注册形态11-个-command)
   - [1.8 API 注册形态：18 个 `@API`（6 公开 + 12 私有）+ 2 个 `@Tool` + 1 个 `@HomeCard`](#18-api-注册形态18-个-api6-公开--12-私有-2-个-tool--1-个-homecard)
   - [1.9 后台循环族：`_start_tasks` 的六个循环与 `_maintenance_tick`](#19-后台循环族_start_tasks-的六个循环与-_maintenance_tick)
   - [1.10 依赖与降级：`requirements.txt`](#110-依赖与降级requirementstxt)
@@ -71,7 +71,7 @@
   - [5.9 发送确认：`on_send_before` / `on_send_after`](#59-发送确认on_send_before--on_send_after)
   - [5.10 `adapter_compat`：两套适配器兼容层](#510-adapter_compat两套适配器兼容层)
   - [5.11 撤回处理全链](#511-撤回处理全链)
-  - [5.12 命令菜单与结果卡渲染](#512-命令菜单与结果卡渲染)
+  - [5.12 命令菜单与文本发送](#512-命令菜单与文本发送)
   - [5.13 `task_context`：主动任务归因](#513-task_context主动任务归因)
   - [5.14 配置项速查（消息链路相关）](#514-配置项速查消息链路相关)
   - [5.15 容易踩的坑（汇总）](#515-容易踩的坑汇总)
@@ -159,7 +159,7 @@
 
 ### 这份文档怎么用
 
-- **先建立地图再动手**：第 1 章给出装配顺序与全部注册点（7 个 Hook、22 个命令、18 个 API、6 个后台循环），第 3 章给出唯一的持久层契约。改任何行为前，先在这两章定位它挂在哪。
+- **先建立地图再动手**：第 1 章给出装配顺序与全部注册点（7 个 Hook、11 个命令、18 个 API、6 个后台循环），第 3 章给出唯一的持久层契约。改任何行为前，先在这两章定位它挂在哪。
 - **按任务选章**：改消息行为读第 5 章 + 第 10 章；改睡眠/日程/闸门读第 4 章 + 第 11.2 节；改配置字段或热更新读第 2 章；排查「主动不说话」读第 6 章 + 第 12 章；改 WebUI/管理读第 9 章；改搜索/新闻读第 7 章；改创作/社交读第 8 章。
 - **行号会漂移**：引用格式是 `文件:行号`，但代码持续演进。定位符号时先搜标识符（函数名/常量名），行号只用来快速跳转。
 
@@ -171,7 +171,7 @@
 4. **平台确认才结算**：主动额度只在 `mark_pending_sent`（`core/storage.py:1078-1125`，调用点 `plugin.py:1574`）累加；唤醒是两段式（候选 `wake_candidates` → 发送成功后 `commit_for_send`，`life/rest_gate.py:116-122`、`life/rest_gate.py:201-206`）。
 5. **防抖输家必须 abort**：`MessageDebouncer.collect` 返回 `allowed=False` 时调用方必须 `abort`（`plugin.py:991`、`plugin.py:1065-1066`），否则同一条消息会被两个 Hook 各处理一遍，产生重复回复。
 6. **隐私分层**：日记只有 owner 可读（`life/memory_service.py:256-266`）；群摘要原文绝不入库、敏感内容模型前拒（`social/group_observer.py:141`）；搜索 Key 只出指纹、原始 Key 从不入库（`information/search_service.py:75`、`core/storage.py:428`）；搜索词过隐私清洗（`information/search_service.py:127`）。
-7. **失败开放与降级**：`_is_recalled` 存储异常时放行（`plugin.py:852-856`）；菜单/结果卡渲染失败降级纯文本（`plugin.py:1771-1776`）；模型不可用走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`）。
+7. **失败开放与降级**：`_is_recalled` 存储异常时放行（`plugin.py:843-846`）；模型不可用走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`）。
 8. **热更新期间消息「不增强但放行」**：`_reloading` 标志让所有 Hook 直接 continue（`plugin.py:951` 等）；`on_config_update` 里 `config_data` 已被 SDK 落进 `self.config`，方法开头 `del config_data,version`（`plugin.py:328`），不要自解析传入字典。
 9. **命令 pattern 是单一事实来源**：`_command_pattern_res()` 导入时从 `__maibot_component_info__` 实时收集（`plugin.py:2761-2772`），新增命令必须走 `@Command`，手写派发会被「未识别指令」兜底误伤。
 10. **新服务必须手动加进热更新分发元组**：`plugin.py:338-341`（17 个服务），漏加的症状是「保存配置不生效，重启才好」，没有任何编译期检查会提醒你（v1.14.8 真实事故见 §2.6.3）。
@@ -186,7 +186,7 @@
 | `tests/test_creation.py` + `tests/test_social.py` | 创作流水线/续写/额度、群观察/转述——**本套件撰稿时真实跑过**：`Ran 38 tests, OK`（§8.验证记录） | SDK 2.9.0 本地副本 |
 | `tests/test_life_memory.py` | 日期补算、日记补算、主动跳过原因、连续性降级 | 需要 `maibot_sdk` |
 | `tests/test_message_experience.py` / `tests/test_recall.py` / `tests/test_task_context.py` | Focus 共享 session 隔离、撤回合并、任务归因防重 | 需要 `maibot_sdk` |
-| `tests/test_management.py` / `tests/test_command_menu.py` | 管理脱敏（书柜不返回正文）、命令菜单中文 scope 映射 | 需要 `maibot_sdk` |
+| `tests/test_management.py` / `tests/test_command_menu.py` | 管理脱敏（书柜不返回正文）、命令目录↔注册一致性与命令文本路径 | 需要 `maibot_sdk` |
 | `tests/test_information.py` / `tests/test_playwright_search.py` | weak 校准、Bing 解析、冷却归类、查询整形 | 需要 `maibot_sdk` + `playwright` |
 
 环境注意：仓库测试套件依赖 Host SDK。撰稿时的两种可行方式见 §12.1.4——本地 SDK 副本 + `PYTHONPATH`（创作/社交两文件真实跑通 38 项）或进程内最小替身（其余章的只读实测）。`tests/support.py` 里的替身是空实现（如 `mark_woken`，`tests/support.py:85-87`），不要以它推断真实行为。
@@ -195,7 +195,7 @@
 
 ## 1. 入口与装配
 
-> 本章覆盖插件的「身份」与「出生」：`_manifest.json` 全字段、`__init__.py` 与工厂、`MaiLifePlugin` 类骨架、`on_load` 装配顺序、7 个 Hook 注册点、生命周期、22 个命令与 18 个 API 的注册形态、6 个后台循环、依赖与降级。
+> 本章覆盖插件的「身份」与「出生」：`_manifest.json` 全字段、`__init__.py` 与工厂、`MaiLifePlugin` 类骨架、`on_load` 装配顺序、7 个 Hook 注册点、生命周期、11 个命令与 18 个 API 的注册形态、6 个后台循环、依赖与降级。
 > 所有 `文件:行号` 相对 `Mai_life/`；未能从本轮通读中确认的内容明确标注「未确认」。
 
 ### 1.1 插件身份与 `_manifest.json` 字段逐解
@@ -206,12 +206,12 @@
 |---|---|---|
 | `manifest_version` | `2` | 清单格式版本（`_manifest.json:2`）。 |
 | `id` | `maibot-community.mai-life` | 插件全限定 ID（`_manifest.json:3`）。代码侧常量 `PLUGIN_ID` 必须与它逐字一致，否则主动任务回写会错位——`messaging/task_context.py:11` 定义为同一字符串，`HOST_TASK_PREFIX = f"proactive:{PLUGIN_ID}:"`（`messaging/task_context.py:12`）。改 manifest id 不同步改代码是高危操作。 |
-| `name` / `version` / `description` | `麦生活` / `1.22.1` / 见文件 | `version`（`_manifest.json:5`）与代码内 `PLUGIN_VERSION = "1.22.1"`（`config.py:15`）、入口 docstring（`plugin.py:1`）三处手工保持一致；`PLUGIN_VERSION` 会经 `@HomeCard` 和 `/麦麦状态` 展示给用户，漂移会被直接看见。 |
+| `name` / `version` / `description` | `麦生活` / `1.23.0` / 见文件 | `version`（`_manifest.json:5`）与代码内 `PLUGIN_VERSION = "1.23.0"`（`config.py:15`）、入口 docstring（`plugin.py:1`）三处手工保持一致；`PLUGIN_VERSION` 会经 `@HomeCard` 和 `/麦麦状态` 展示给用户，漂移会被直接看见。 |
 | `host_application` | `min_version: 1.3.6`，`max_version: 1.3.99` | 主程序（MaiBot 本体）版本闭区间（`_manifest.json:12-15`）。上限写成 `1.3.99` 而非 `1.4.0`，表示只承诺兼容 1.3.x 补丁/小版本，不为未来 minor 背书。 |
 | `sdk` | `min_version: 2.7.0`，`max_version: 2.99.99` | Plugin SDK 版本区间（`_manifest.json:16-19`）。注意代码里 `_resolve_data_dir` 为「SDK 2.6+ 才有 `ctx.paths.data_dir`」写了回退分支（`plugin.py:241-248`），而清单已要求 ≥2.7.0——该回退是防御性冗余，正常路径永远不会走插件内 `data/`。 |
 | `dependencies` | `playwright>=1.49,<2` | 声明式 Python 依赖，只列了 `playwright`（`_manifest.json:20-26`）；`requirements.txt` 另有三项（见 §1.10）。两处清单不一致本身是事实，谁在部署时消费 `requirements.txt` **未确认**。 |
 | `plugin_type` | `extension` | 插件类型为扩展（`_manifest.json:27`）。按 MaiBot 插件开发技能文档，`plugin_type` 可选、缺省即 `extension`（外部技能文档 `~/.agents/skills/maibot-plugin-dev/SKILL.md:69`，非仓库文件）；此处显式声明。其余取值语义不在本轮通读范围内，**未确认**。 |
-| `capabilities` | 15 项 | Host 授予的能力白名单（`_manifest.json:28-44`）：`send.text`、`send.image`、`chat.get_all_streams`、`chat.get_stream_by_user_id`、`chat.get_private_streams`、`chat.get_stream_by_group_id`、`chat.get_group_streams`、`chat.open_session`、`llm.generate`、`llm.get_available_models`、`message.get_by_id`、`api.call`、`maisaka.proactive.trigger`、`config.get`、`component.list_loaded_plugins`（共 15 项）。`plugin.py` 内直接出现的只有 `ctx.config.get`（`plugin.py:529`、`plugin.py:532`）、`ctx.chat.get_stream_by_user_id`（`plugin.py:665`）、`ctx.chat.get_private_streams`（`plugin.py:674`）、`ctx.component.list_loaded_plugins`（`plugin.py:551`）与 `ctx.paths.data_dir`（`plugin.py:246`），其余能力由各服务模块内部使用——增删 capability 时必须全仓库核对，不能只搜 `plugin.py`。 |
+| `capabilities` | 15 项 | Host 授予的能力白名单（`_manifest.json:28-44`）：`send.text`、`send.image`、`chat.get_all_streams`、`chat.get_stream_by_user_id`、`chat.get_private_streams`、`chat.get_stream_by_group_id`、`chat.get_group_streams`、`chat.open_session`、`llm.generate`、`llm.get_available_models`、`message.get_by_id`、`api.call`、`maisaka.proactive.trigger`、`config.get`、`component.list_loaded_plugins`（共 15 项）。其中 `send.image` 自 v1.23.0 移除本地生图链后，唯一消费者是 `mai_life_browse_web` 的网页截图（`plugin.py:1696`）。`plugin.py` 内直接出现的只有 `ctx.config.get`（`plugin.py:529`、`plugin.py:532`）、`ctx.chat.get_stream_by_user_id`（`plugin.py:665`）、`ctx.chat.get_private_streams`（`plugin.py:674`）、`ctx.component.list_loaded_plugins`（`plugin.py:551`）与 `ctx.paths.data_dir`（`plugin.py:246`），其余能力由各服务模块内部使用——增删 capability 时必须全仓库核对，不能只搜 `plugin.py`。 |
 | `i18n` | `zh-CN` 唯一 | 默认与支持语种都只有简体中文（`_manifest.json:45-50`）；所有用户可见文案都是硬编码中文，没有多语言机制。 |
 | `urls` | 仓库/主页/文档 | 三个 URL 均指向 GitHub 与 `docs.mai-mai.org`（`_manifest.json:51-55`）。 |
 | `display.icon` | `type: local`、`value: mailife.png`、`fallback: fish`、`background: #BFE3F2` | 本地图标（`_manifest.json:56-63`）：优先用插件目录内的 `mailife.png`（该文件确实存在于插件根，已由目录列举确认），缺失时回退内置 `fish` 图标，并指定浅蓝底色 `#BFE3F2`。与 WebUI 页面图标、HomeCard 图标是三套互不相干的机制，详见 §9.4。 |
@@ -275,16 +275,15 @@
 
 热更新到达各服务的完整链路、三种 `update_config` 实现形态、v1.14.8 `BedtimeManager` 漏配事故与回归测试，详见 §2.6。
 
-### 1.7 命令注册形态：22 个 `@Command`
+### 1.7 命令注册形态：11 个 `@Command`
 
-命令全部集中在 `plugin.py:1795-2045`，共 **22 个**。命名与 pattern 有严格规律：
+命令全部集中在 `plugin.py:1760-1885`（`cmd_menu` 至 `cmd_rest_test`），共 **11 个**。命名与 pattern 有严格规律：
 
 - **中英双名**：每个命令的 `name` 是中文 `/麦麦X`，pattern 用 `^(?:/麦麦X|/mai_x)` 二选一（如 `plugin.py:1806`：`/麦麦状态` 与 `/mai_status`）。
-- **边界前瞻**：无参命令一律以 `(?=\s|$)` 收尾（如 `plugin.py:1811`），防止 `/麦麦状态x` 被误派发；带参命令用命名组 `(?P<...>)`（如 `/麦麦添加日期` 的 `(?P<event_date>\d{4}-\d{2}-\d{2})\s+(?P<event_name>.+)$`，`plugin.py:1862`）。
+- **边界前瞻**：无参命令一律以 `(?=\s|$)` 收尾（如 `plugin.py:1771`），防止 `/麦麦状态x` 被误派发；带参命令用命名组 `(?P<...>)`（如 `/麦麦添加日期` 的 `(?P<event_date>\d{4}-\d{2}-\d{2})\s+(?P<event_name>.+)$`，`plugin.py:1775`）。
 - **入口命令兼兜底**：`/麦麦` 的 pattern 带可选 `(?P<content>[\s\S]+)`（`plugin.py:1795`），无 content 或 `help/?/？/帮助` 时出菜单，否则提示未知子命令并出菜单（`plugin.py:1796-1804`）。
-- **`/麦麦管理` 的 scope 混排**：中文范围与英文旧范围写在同一个 alternation 里，进方法后经 `ADMIN_SCOPE_ALIASES` 归一化（`plugin.py:44-47`、`1993`）。
 
-全部命令共用同一条发送链：`_command_access` 权限判定（`plugin.py:1734-1741`，**群聊一律拒绝**，仅启用用户或显式管理员可在私聊执行）→ `_send_command`（`plugin.py:1755-1777`）经 `MaiLifeCommandResultRenderer` 渲染成图、失败降级文本；菜单走 `_send_command_menu`（`plugin.py:1779-1793`，PNG 优先、纯文本兜底）。返回值统一为 `tuple[bool,str,int]`。渲染细节见 §5.12。
+全部命令共用同一条发送链：`_command_access` 权限判定（`plugin.py:1724`，**群聊一律拒绝**，仅启用用户或显式管理员可在私聊执行）→ `_send_command`（`plugin.py:1745`）经 `CommandReplyService.send_text_with_fallback` 纯文本发送；菜单走 `_send_command_menu`（`plugin.py:1755`，`build_command_usage_text` 生成菜单文本）。返回值统一为 `tuple[bool,str,int]`。发送细节见 §5.12。
 
 **单一事实来源**：`_command_pattern_res()`（`plugin.py:2761-2768`）在导入时从各方法的 `__maibot_component_info__` 实时收集全部 pattern，编译成 `_MAI_COMMAND_RES`（`plugin.py:2772`），供「未识别指令」兜底使用——`_is_unmatched_mai_command`（`plugin.py:925-934`）判断「命令形态 + `/麦麦` 或 `/mai` 开头 + 不命中任何自家 pattern」，命中则回菜单并 `abort`，避免手滑输入落进 AI 闲聊。新增命令不需要再维护第二份正则；反之，绕过 `@Command` 自定义派发会立刻被这个兜底误伤。
 
@@ -313,7 +312,7 @@
 
 ### 1.10 依赖与降级：`requirements.txt`
 
-`requirements.txt` 列四项：`playwright>=1.49,<2`（`requirements.txt:2`）、`chinese-calendar>=1.0,<2`（`requirements.txt:6`，工作日/节假日/调休）、`lunar-python>=1.4,<2`（`requirements.txt:7`，农历节气）、`Pillow>=10.0,<12`（`requirements.txt:8`，本地指令菜单渲染）。文件内注释（`requirements.txt:4-5`）写明设计立场：**缺失时代码有降级守卫（环境/菜单自动降级），但安装失败不由插件文件兜底，由部署环境保证装齐**——对应到代码：菜单渲染失败降级纯文本（`plugin.py:1771-1776`、`1790-1793`）、Playwright 缺失按错误类别透传（`plugin.py:1697-1702`）、绘图/节假日类增强在 `EnvironmentService` 内静默降级。**坑：manifest `dependencies` 只声明了 `playwright`**（`_manifest.json:20-26`），另三项仅存在于 `requirements.txt`；部署链路是否读取 `requirements.txt` **未确认**，更换宿主或打包方式时需重新验证。
+`requirements.txt` 列三项：`playwright>=1.49,<2`（`requirements.txt:1`）、`chinese-calendar>=1.0,<2`（`requirements.txt:5`，工作日/节假日/调休）、`lunar-python>=1.4,<2`（`requirements.txt:6`，农历节气）。文件内注释（`requirements.txt:3-4`）写明设计立场：**缺失时代码有降级守卫（环境自动降级），但安装失败不由插件文件兜底，由部署环境保证装齐**——对应到代码：Playwright 缺失按错误类别透传（`plugin.py:1683-1689`）、绘图/节假日类增强在 `EnvironmentService` 内静默降级。**坑：manifest `dependencies` 只声明了 `playwright`**（`_manifest.json:20-26`），另两项仅存在于 `requirements.txt`；部署链路是否读取 `requirements.txt` **未确认**，更换宿主或打包方式时需重新验证。
 
 ### 1.11 汇总：维护者最常踩的坑
 
@@ -428,7 +427,7 @@ python -c "
 import sys; sys.path.insert(0,'.'); sys.path.insert(0,'D:/workdoc/love/maibot-plugin-sdk-latest')
 from config import MaiLifeSettings
 from maibot_sdk.config import generate_plugin_config_schema
-schema = generate_plugin_config_schema(MaiLifeSettings, plugin_id='maibot-community.mai-life', plugin_version='1.22.1')
+schema = generate_plugin_config_schema(MaiLifeSettings, plugin_id='maibot-community.mai-life', plugin_version='1.23.0')
 for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']): print(s['order'], name, s['title'])
 "
 ```
@@ -734,7 +733,7 @@ for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']):
 
 #### 2.4.1 版本常量的位置
 
-`CONFIG_SCHEMA_VERSION = "1.11.0"`（`config.py:16`），只被两处使用：`plugin.config_version` 字段默认值（`config.py:79`）和 `normalize_config_version` 的返回值（`config.py:118`）。注意它与 `PLUGIN_VERSION`（`config.py:15`，当前 `1.22.1`）是**两套独立版本**：Schema 版本只在配置结构变化时升，插件版本每次发布都升。
+`CONFIG_SCHEMA_VERSION = "1.11.0"`（`config.py:16`），只被两处使用：`plugin.config_version` 字段默认值（`config.py:79`）和 `normalize_config_version` 的返回值（`config.py:118`）。注意它与 `PLUGIN_VERSION`（`config.py:15`，当前 `1.23.0`）是**两套独立版本**：Schema 版本只在配置结构变化时升，插件版本每次发布都升。
 
 #### 2.4.2 SDK 框架侧契约
 
@@ -778,20 +777,20 @@ print('sections:', list(type(cfg).model_fields.keys()))
 "
 ```
 
-输出：`validate OK; version = 1.11.0 | PLUGIN_VERSION = 1.22.1`，20 个节名与 §2.1.2 表一致。这与契约测试 `test_default_toml_validates`（`tests/test_contract.py:55-79`）等价；仓库内对应的旧版本号校正测试见 `tests/test_contract.py:169-172`。
+输出：`validate OK; version = 1.11.0 | PLUGIN_VERSION = 1.23.0`，20 个节名与 §2.1.2 表一致。这与契约测试 `test_default_toml_validates`（`tests/test_contract.py:55-79`）等价；仓库内对应的旧版本号校正测试见 `tests/test_contract.py:169-172`。
 
 ### 2.5 `PLUGIN_VERSION` 的位置与同步
 
-`PLUGIN_VERSION = "1.22.1"` 定义在 `config.py:15`（与 `CONFIG_SCHEMA_VERSION` 相邻但语义无关）。消费点：
+`PLUGIN_VERSION = "1.23.0"` 定义在 `config.py:15`（与 `CONFIG_SCHEMA_VERSION` 相邻但语义无关）。消费点：
 
 - 入口日志：`plugin.py:301`（加载完成横幅）、`plugin.py:2069`（状态指令）、`plugin.py:2214`（WebUI 状态数据）；
-- HTTP User-Agent：`information/http_client.py:18`（`Mai_life/1.22.1 (+https://github.com/octmicy/Mai_life)`）；
-- 管理概览版本：`management/admin_service.py:120`；菜单渲染：`messaging/menu_renderer.py:283`（默认参数）；
+- HTTP User-Agent：`information/http_client.py:18`（`Mai_life/1.23.0 (+https://github.com/octmicy/Mai_life)`）；
+- 管理概览版本：`management/admin_service.py:120`；
 - 导入点：`plugin.py:18`。
 
-**为什么这样设计**：单一常量 + 各处 import，避免硬编码版本号漂移；`test_contract.py:40-55` 的契约测试会断言 `PLUGIN_VERSION == "1.22.1"`、User-Agent 含该常量、且一组文件（`plugin.py`、`management/admin_service.py`、`messaging/menu_renderer.py`、`information/http_client.py`、`core/environment.py`、`config.py`、`README.md`、`_manifest.json`）不得残留旧版本号。
+**为什么这样设计**：单一常量 + 各处 import，避免硬编码版本号漂移；`test_contract.py:40-55` 的契约测试会断言 `PLUGIN_VERSION == "1.23.0"`、User-Agent 含该常量、且一组文件（`plugin.py`、`management/admin_service.py`、`information/http_client.py`、`core/environment.py`、`config.py`、`README.md`、`_manifest.json`）不得残留旧版本号。
 
-**容易踩的坑**：`_manifest.json:5` 的 `version` 与 `config.py:15` 是两份独立事实，发版必须同步；`HANDOVER.md:227` 记了完整发版清单（`config.py:PLUGIN_VERSION`、`_manifest.json:version`、`plugin.py` docstring、README 版本行、两个测试文件的版本断言）。另注意 `plugin.py:1` 的 docstring 也写了版本号（`Mai_life v1.22.1 插件入口`），它是纯文本、不被测试断言覆盖，容易漏改。
+**容易踩的坑**：`_manifest.json:5` 的 `version` 与 `config.py:15` 是两份独立事实，发版必须同步；`HANDOVER.md:227` 记了完整发版清单（`config.py:PLUGIN_VERSION`、`_manifest.json:version`、`plugin.py` docstring、README 版本行、两个测试文件的版本断言）。另注意 `plugin.py:1` 的 docstring 也写了版本号（`Mai_life v1.23.0 插件入口`），它是纯文本、不被测试断言覆盖，容易漏改。
 
 ### 2.6 热更新如何到达各服务（`update_config` 分发）
 
@@ -830,14 +829,14 @@ WebUI 保存配置
 
 #### 2.6.3 回归测试与历史 bug
 
-`tests/test_fixes.py:2233-2248`（`test_config_update_reaches_bedtime_manager`）是这条链路的回归测试：改 `rest_gate.night_start` → `set_plugin_config` → `_apply_config_update("self", {}, "")` → 断言 `plugin._bedtime.config is plugin.config` 且新时间立即生效。它记录的 v1.14.8 bug 与 CHANGELOG 条目（`CHANGELOG.md:231`）是同一件事：`BedtimeManager` 曾被漏出 `_apply_config_update` 的分发列表，导致"WebUI 保存后闸门用新时间，而晚安提示/入睡推迟一直持有 on_load 时的旧时间，直到重启插件才生效"。
+`tests/test_fixes.py:2233-2248`（`test_config_update_reaches_bedtime_manager`）是这条链路的回归测试：改 `rest_gate.night_start` → `set_plugin_config` → `_apply_config_update("self", {}, "")` → 断言 `plugin._bedtime.config is plugin.config` 且新时间立即生效。它记录的 v1.14.8 bug 与 CHANGELOG 条目（`CHANGELOG.md:253`）是同一件事：`BedtimeManager` 曾被漏出 `_apply_config_update` 的分发列表，导致"WebUI 保存后闸门用新时间，而晚安提示/入睡推迟一直持有 on_load 时的旧时间，直到重启插件才生效"。
 
-**为什么这样设计**：服务在 `on_load` 一次性构造并捕获配置实例（`plugin.py:273-290`），SDK 在热更新时替换的是插件级实例；不重新指向，每个服务将永远持有旧对象——v1.14.8 的 bug 正是漏配一个服务的后果。按 scope 分发（而非每次全量重放）则让 bot/model 类广播不必重启整套服务（`CHANGELOG.md:475`）。
+**为什么这样设计**：服务在 `on_load` 一次性构造并捕获配置实例（`plugin.py:273-290`），SDK 在热更新时替换的是插件级实例；不重新指向，每个服务将永远持有旧对象——v1.14.8 的 bug 正是漏配一个服务的后果。按 scope 分发（而非每次全量重放）则让 bot/model 类广播不必重启整套服务（`CHANGELOG.md:497`）。
 
 **容易踩的坑**：
 
 1. **新增服务必须手动加进 `plugin.py:338-341` 的分发元组**——漏加的症状是"保存配置不生效，重启才好"，且没有任何编译期或启动期检查会提醒你（历史事故见上）。
-2. `_command_replies`、`_menu_renderer`、`_result_renderer`、`_prompts`（PromptBuilder）不在名单里，因为它们的构造不依赖 `MaiLifeSettings`（`plugin.py:289`、`206-209`）；给它们加配置依赖时别忘了同步加分发。
+2. `_command_replies`、`_prompts`（PromptBuilder）不在名单里，因为它们的构造不依赖 `MaiLifeSettings`（`plugin.py:201`、`281`）；给它们加配置依赖时别忘了同步加分发。
 3. 内存运行态不会被 `update_config` 清空：防抖 burst、绘图联动频控、群轮次表等由 `_apply_config_update` 显式清理（`plugin.py:332-334`），新增运行态字典时要评估是否加入清理，否则热更新后可能串轮次。
 4. `scope=="bot"` 只刷人格/角色名，不动插件配置；角色名通过 `set_bot_name`/`set_personality` 单独分发（`plugin.py:536-545`），与 `update_config` 是两条并行通道。
 
@@ -1019,7 +1018,7 @@ recall_events / group_user_activity）和 `core/storage.py:473-477`（global_sta
 | `users` | `user_id` 主键；`enabled`/`proactive_enabled`/`role`/`daily_proactive_max`/`temperature`/`quiet_start`/`quiet_end`/`stream_id`/`last_user_message_at`/`last_proactive_at`/`proactive_day`/`proactive_count`/`last_relation_day` | 用户档案、关系温度、主动额度 | `sync_users`（`plugin.py:292`、`:346`）；`record_interaction` 更新 `last_user_message_at`（`core/storage.py:913`）；`update_relationships` 按日结算温度（`plugin.py:519`）；`mark_pending_sent` 累计主动额度（`core/storage.py:1114-1116`）；`set_user_stream`/`update_user_display_name`（`plugin.py`） |
 | `interaction_events` | `user_id`/`created_at`/`kind`(`message`/`proactive_response`)/`hour`/`content_summary`(≤240 字符)/`source_message_id` | 互动流水（活跃时段、日记计数、撤回溯源） | `record_interaction`（`plugin.py:1080`，同事务写 message 事件并识别 2 小时内的主动回应）；删除在 `core/storage.py:1404` |
 | `proactive_events` | `id`/`user_id`/`opportunity_id`/`stream_id`/`status`/`created_at`/`expires_at`/`sent_at`/`host_task_id` | 主动发送事件状态机（pending→sent/expired/failed/cancelled） | `add_proactive_pending`（`life/proactive.py:98`）；`set_proactive_task_id`/`set_proactive_event_status`（`life/proactive.py`、`plugin.py`）；`mark_pending_sent`（`plugin.py:1574`）；`expire_pending`（`life/proactive.py:43`） |
-| `proactive_skip_stats` | `user_id`/`reason`/`day`/`count`，联合主键 | 主动候选跳过原因聚合，供 `/麦麦管理 主动` 诊断 | `record_proactive_skip`（`life/proactive.py:49`、`:70`、`:75`、`:78`、`:80` 等）；过期事件记 `planner_no_reply`（`core/storage.py:1159-1163`） |
+| `proactive_skip_stats` | `user_id`/`reason`/`day`/`count`，联合主键 | 主动候选跳过原因聚合，供 WebUI「系统与配置」页主动候选诊断 | `record_proactive_skip`（`life/proactive.py:49`、`:70`、`:75`、`:78`、`:80` 等）；过期事件记 `planner_no_reply`（`core/storage.py:1159-1163`） |
 | `rest_backlogs` | `user_id`/`created_at`/`summary`/`consumed`/`source_message_id` | 休息期间积压的用户消息摘要 | `add_rest_backlog`（`plugin.py:1098`）；消费 `consume_rest_backlogs`/`peek_rest_backlogs` |
 | `conversation_continuity` | `user_id` 主键；`intent`/`unresolved_topics`(JSON，≤5 条)/`updated_at` | 连续话题意图与未决话题 | `save_continuity`（`life/continuity.py:24`、`:27`、`:42`、`:44`；`plugin.py:868`、`:889` 清空） |
 | `wake_candidates` | `session_id` 主键；`user_id`/`message_id`/`reason`/`expires_at` | 判醒待醒候选（真实发送才消费） | `set_wake_candidate`/`pop_wake_candidate`（`life/rest_gate.py:120`、`:203`）；`clear_wake_candidate`（`plugin.py`） |
@@ -1778,7 +1777,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 
 ## 5. 消息链路
 
-> 本章只覆盖「消息链路」：从 `chat.receive.before_process` Hook 收到一条消息，到这条消息产生的回复真正从适配器发出去的完整路径，以及沿途的命令菜单/结果卡渲染、撤回取消与主动任务归因。跨模块的完整时序另见 §10.1。
+> 本章只覆盖「消息链路」：从 `chat.receive.before_process` Hook 收到一条消息，到这条消息产生的回复真正从适配器发出去的完整路径，以及沿途的命令菜单文本发送、撤回取消与主动任务归因。跨模块的完整时序另见 §10.1。
 > 所有路径相对 `Mai_life/`。代码结论均标注 `文件:行号`；凡本机实测过的结论会写明运行方式，未运行的测试只作为「设计意图」的旁证，不作为通过证据。
 
 ### 5.1 总览：一条消息的六个阶段
@@ -2295,19 +2294,19 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 - 入站最早阶段 `note_inbound`（`messaging/recall_service.py:64`）只缓存有限文字。**只对私聊 + 已配置且启用的用户**（`messaging/recall_service.py:68-71`），二进制永远不会进入撤回服务
 - `query_prompt_context`（`messaging/recall_service.py:218`）生成不可信数据块，没有缓存时**明确禁止模型猜测**（`messaging/recall_service.py:237`）
 - `planner_context` 群会话只提示「有撤回发生」，不列消息 ID（`messaging/recall_service.py:196-202`），减少无谓的信息暴露
-- `format_query_result`（`messaging/recall_service.py:241`）供 `/麦麦撤回` 命令使用
+- `format_query_result`（`messaging/recall_service.py:241`）原供 `/麦麦撤回` 命令使用；该命令已于 v1.23.0 移除，方法按服务层契约保留、当前无生产调用方
 
 **为什么默认关闭**：`cache_summary_enabled` 默认 `False`（`config.py:986-993`），关闭时 `on_load` 会 `clear_recall_summaries()`（`plugin.py:269-270`）。保留期 `summary_ttl_minutes` 默认 10 分钟，长度上限 `summary_max_chars` 默认 240 字符。
 
 **容易踩的坑**：`recall_service.py:145-146` 有一段**看起来冗余的重复判断**（`if not self.config.recall.enabled or not self.config.recall.cache_summary_enabled: summary=""; media=[]; authorized=False`）。这是为热重载竞态准备的：上面的 `if self.config.recall.cache_summary_enabled and not group_id and user_id` 分支里有 `await self.store.get_user(user_id)`，配置可能在这期间被改掉。
 
-### 5.12 命令菜单与结果卡渲染
+### 5.12 命令菜单与文本发送
 
 命令路径与 AI 链路完全分离：`on_receive` 里 `is_command` 直接旁路（`plugin.py:981-982`、`plugin.py:1051-1052`），由 Host 按 `@Command` pattern 派发到 `cmd_*` 方法。
 
 #### 5.12.1 目录单一来源
 
-`COMMAND_SECTIONS`（`messaging/command_catalog.py:19-48`）是唯一目录，分四组：日常状态 / 生活记录 / 见闻与书柜 / 管理与诊断。`build_command_usage_text`（`messaging/command_catalog.py:51`）生成不依赖 Markdown 的纯文本降级内容。
+`COMMAND_SECTIONS`（`messaging/command_catalog.py:19-37`）是唯一目录，分四组：日常状态 / 生活记录 / 见闻与书柜 / 管理与诊断（v1.23.0 精简后依次为 2/3/1/3 项，共 9 项）。`build_command_usage_text`（`messaging/command_catalog.py:40`）生成不依赖 Markdown 的纯文本菜单内容——命令菜单的唯一发送形态。
 
 **为什么命令 pattern 不手写两份**：`_command_pattern_res()`（`plugin.py:2761-2768`）用 `__maibot_component_info__` 从 `@Command` 装饰实时收集全部 pattern，`_SUSPECT_COMMAND_RE` + `_matches_own_command`（`plugin.py:2773`、`plugin.py:2786`）据此判断「像命令但不是我们的命令」。新增命令时只需加 `@Command`，两处自动同步。
 
@@ -2324,42 +2323,14 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 
 **为什么管理员是独立身份**：`plugin.py:1739` 注释——管理员不应被迫再创建一份私聊关系档案。`_is_admin` 在 `admin_user_ids` 为空时回退取第一个启用档案（`plugin.py:1714-1717`）。
 
-#### 5.12.3 菜单 PNG 渲染
+#### 5.12.5 纯文本发送
 
-`MaiLifeMenuRenderer`（`messaging/menu_renderer.py:22`）：
+`_send_command_menu`（`plugin.py:1755`）：v1.23.0 起菜单只有一条路径——直接调 `_send_command(kwargs, build_command_usage_text(notice))`。
 
-- 宽度 1320px，注释说明在 QQ 压缩后仍清晰（`messaging/menu_renderer.py:25-26`）
-- 双栏布局：**先完整测量两列高度再创建画布**，避免长命令把页脚挤出图片（`messaging/menu_renderer.py:300-306`）
-- 字体优先级：圆体 → 圆润黑体 → 现代黑体 → 通用无衬线（`_FONT_KEYWORD_PRIORITY`，`messaging/menu_renderer.py:51-63`）。查找顺序 explicit → 插件内置字体 → `fc-list :lang=zh` 动态扫描 → 已知路径兜底（`_find_font_paths`，`messaging/menu_renderer.py:125-152`）。**注意：本仓库并不内置字体目录**——代码会在插件根的 `assets/` 子目录下查找内置字体（`messaging/menu_renderer.py:133`、`:150`），但该目录未随仓库分发，只有自行放置过字体的环境才会命中这一级；本机（Windows，无该目录）实测走的是已知路径兜底，命中 `C:\WINDOWS\Fonts\SIMYOU.TTF`
-- bold 优先用插件内置的独立粗体文件（同样仅在自行放置时才存在），否则复用 regular 并用**描边合成粗体**（`messaging/menu_renderer.py:148-152`）——保证标题与正文同字体，也避免误用不含中文的粗体字体
-- `_encode_png` 量化到 64 色（`messaging/menu_renderer.py:274-281`），注释说体积可降一个数量级；量化失败回退原始 RGBA→RGB，渲染可用性优先于体积
-- LRU 缓存 `CACHE_LIMIT=8`，cache_key 含 title/version/notice/sections（`messaging/menu_renderer.py:288-292`）
-
-我在本机实跑：`MaiLifeMenuRenderer().render(...)` 在本机（Windows，无 `assets/` 目录）命中 `C:\WINDOWS\Fonts\SIMYOU.TTF`，输出 74204 字节 PNG；相同参数第二次调用返回同一份 bytes（缓存命中）。`available=True`，`last_error` 为空。
-
-**为什么没有中文字体时直接返回 `b""`**：`messaging/menu_renderer.py:285-286` 注释——`load_default` 只会画出豆腐块，与其发不可读的图不如直接降级文本。
-
-#### 5.12.4 结果卡渲染
-
-`MaiLifeCommandResultRenderer`（`messaging/command_result_renderer.py:24`）继承菜单渲染器：
-
-- `LINES_PER_PAGE=42`、`MAX_TEXT_CHARS=20000`、`CACHE_LIMIT=16`
-- `_accent_for`（`messaging/command_result_renderer.py:54-57`）：错误和权限提示（失败/无权/仅对/只有/尚未初始化/未能/没有找到/格式无效/请先）用柔和暖色 `#B56F83`，其余保持主题蓝紫 `#6678C8`
-- `_clean_text`（`messaging/command_result_renderer.py:36-41`）：空文本替换为「指令已执行，没有可显示内容。」；超长截断并附说明
-- `RenderedCommandPage` 同时保存 PNG 与 `plain_text`（`messaging/command_result_renderer.py:16-21`），docstring 说明是为了「图片发送失败后只降级未发送部分」
-
-我在本机实跑：`render("第一行\n第二行\n\n第三段")` 得 1 页 15941 字节；`render(200 行)` 得 5 页（42 行/页）；`render("")` 的 `plain_text` 是「指令已执行，没有可显示内容。」；`_accent_for("失败：没有找到")` 返回 `#B56F83`，`_accent_for("一切正常")` 返回 `#6678C8`。
-
-#### 5.12.5 发送与降级
-
-`_send_command_menu`（`plugin.py:1779-1793`）：先发 PNG，任何异常都降级到 `_send_command(kwargs, build_command_usage_text(notice))`。
-
-`_send_command`（`plugin.py:1755-1777`）：
+`_send_command`（`plugin.py:1745`）：
 
 1. `_command_access` 不过 → 文本替换为 `PRIVATE_COMMAND_ACCESS_DENIED`
-2. 逐页发图；全部成功 → 返回 `(True, "指令结果图片已发送（N 页）", 2)`
-3. 部分成功 → **只降级尚未发送的部分**（`plugin.py:1771-1775`，注释：避免重复刷屏）
-4. 全部失败 → 发原文
+2. 经 `CommandReplyService.send_text_with_fallback`（`messaging/command_reply.py:113`）发送：成功 → 返回 `(True, "指令结果已发送（文本降级）", 2)`；`send` 返回 False → `(False, "发送返回 False", 2)`；抛异常 → `(False, "发送失败: …", 2)`
 
 `CommandReplyService`（`messaging/command_reply.py:9`）：
 
@@ -2493,8 +2464,6 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 13. **`_append_item_text` 的 `item_id` 必须唯一、`timestamp` 必须可被 `fromisoformat` 解析**（`plugin.py:1177-1180`），写错直接让 Planner 请求失败。
 14. **`on_send_after` 是 OBSERVE 模式**，异常不阻断发送但会让结算丢失。
 15. **改 `rest_gate.force_wake_terms` 会同时改防抖立即结算行为**（`messaging/message_pipeline.py:328-329`）。
-16. **菜单/结果卡渲染任何异常都返回空**（`messaging/menu_renderer.py:346-348`、`messaging/command_result_renderer.py:130-132`），调用方必须准备文本降级；本机无 `assets/` 字体目录时靠系统字体兜底。
-17. **`_send_command` 部分页面成功时只降级剩余页面**（`plugin.py:1771-1775`），不要改成整份重发。
 
 ### 5.16 相关表结构
 
@@ -2510,7 +2479,7 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 
 ### 5.17 本机实测记录
 
-以下结论由我在本次会话中实际运行 Python 验证（工作目录 `D:/workdoc/plugin/Mai_life`，用 `python -` 脚本直接驱动 `messaging/` 下的模块；`menu_renderer` 因依赖包内 `config` 模块（后者导入 `maibot_sdk`，本机未安装）而用 stub 模块加载）：
+以下结论由我在本次会话中实际运行 Python 验证（工作目录 `D:/workdoc/plugin/Mai_life`，用 `python -` 脚本直接驱动 `messaging/` 下的模块）：
 
 - `adapter_name` 对同时含 `snowluma_*` 与 `napcat_*` 的字段返回 `snowluma`
 - `plain_text` / `direct_text` 在合并转发消息上的差异：`'合并转发 里层的话'` vs `'合并转发'`
@@ -2521,7 +2490,6 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 - `PromptBuilder.planner` / `replyer` 的注入顺序与 `_clip` 尾注保留；`relationship_stage` 档位边界
 - `latest_plugin_task_marker` 对旧/新契约解析一致、拒绝带前缀的伪造标签、取最后一条元数据行
 - `ActiveTaskRegistry` 的预留/释放/墓碑四条路径
-- `MaiLifeMenuRenderer.render` 输出 74204 字节 PNG 且缓存命中；`MaiLifeCommandResultRenderer` 分页 42 行/页、空文本占位、强调色分支
 
 **未运行**：`tests/` 下的 pytest 套件。本机 `python -m pytest` 报 `No module named pytest`（Python 3.13.13），且 `import maibot_sdk` 失败，无法组装 `MaiLifePlugin`。文中引用的 `tests/test_*.py:行号` 仅作为设计意图的旁证，不构成通过证据。
 
@@ -2732,7 +2700,7 @@ weight .46 + energy50 + temp30 + 活跃时段 + 积压 -> 0.7233   （过）
 weight .90 + energy50 + temp30 + 活跃时段 + 积压 -> 1.1633   （过）
 ```
 
-**这是一个真实的坑**：日记分享契机 `weight=0.38`（`life/memory_service.py:225`）。当精力低于 40 且心情负向时得分只有 0.26，永远够不到 0.45——表现为主人「从不分享日记」，而 `/麦麦管理 主动` 里会堆一排 `low_score`。改 `score_threshold` 或日记权重时请把这条曲线一起算。
+**这是一个真实的坑**：日记分享契机 `weight=0.38`（`life/memory_service.py:225`）。当精力低于 40 且心情负向时得分只有 0.26，永远够不到 0.45——表现为主人「从不分享日记」，而 WebUI「系统与配置」页的主动候选统计里会堆一排 `low_score`。改 `score_threshold` 或日记权重时请把这条曲线一起算。
 
 选出最高分候选后（`life/proactive.py:94`）：
 
@@ -2777,7 +2745,7 @@ weight .90 + energy50 + temp30 + 活跃时段 + 积压 -> 1.1633   （过）
 
 `day` 由调用方按配置时区算好传入（`life/proactive.py:42`：`now.strftime("%Y-%m-%d")`，注释说明是为避免服务器时区不同导致落错日期桶）；storage 侧 `day` 留空才退回 `time.localtime(now)`（`core/storage.py:1185`）。
 
-查看入口：`/麦麦管理 主动` → `proactive_skip_summary(since_day, 50)`（`plugin.py:2722`），按 reason 聚合总数与涉及用户数。
+查看入口：WebUI「系统与配置」页主动候选段 → `proactive_skip_summary(since_day, 50)`（`plugin.py:2539`），按 reason 聚合总数与涉及用户数。
 
 **诊断「主动发言偏低」的正确顺序**：先看统计里有没有数、是哪种 reason，再决定调什么。
 
@@ -3185,7 +3153,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 **容易踩的坑**：
 
-1. 书柜列表只显示 `status='archived'` 的文档（`core/storage.py:1880`），`inspiration/outline/draft` 状态的文档对 `/麦麦书柜` 不可见；续写中间修订一律 `set_current=False` 就是为了让书全程保持 `archived`、不从书柜消失（`creation/creation_service.py:179-180`）。
+1. 书柜列表只显示 `status='archived'` 的文档（`core/storage.py:1880`），`inspiration/outline/draft` 状态的文档在书柜页不可见；续写中间修订一律 `set_current=False` 就是为了让书全程保持 `archived`、不从书柜消失（`creation/creation_service.py:179-180`）。
 2. 日记是 v1.5 起以 `INSERT OR IGNORE` 回填进书柜的投影（`core/storage.py:484-496`），新建日记时也在同一事务里双写（`core/storage.py:2090-2114`）。改日记表不同步书柜会出现"日记在、书柜没有"的漂移；且这次回填是 DML，后面必须显式 `commit`，否则嵌套事务会触发 `initialize()` 误判并替换整个用户库（`core/storage.py:497-501` 的注释记录了 v9/v10→v11 的真实事故）。
 3. `get_bookshelf_document` 对 private 文档在 `allow_private=False` 时返回 `{}` 而不是抛错（`core/storage.py:1894`），调用方必须把"空 dict"当作"不存在或无权限"两种含义处理。
 4. `management_bookshelf`（管理摘要）刻意不返回正文与修订（`core/storage.py:1949-1957`），而 WebUI 的 `webui_bookshelf_overview` 是主人专属、返回全量正文（`plugin.py:2360-2364`）——两处可见性口径不同，改任一处都要意识到另一处的存在。
@@ -3391,10 +3359,10 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 麦生活有两张面向"主人"的面孔，共用同一套本地数据：
 
-- **聊天内聚合命令**：`/麦麦管理`（别名 `/mai_admin`），由 `management/admin_service.py` 的 `AdminService` 产出脱敏文本，走 `@Command` 通道；
+- **聊天内聚合命令（v1.23.0 起已移除）**：`/麦麦管理`（别名 `/mai_admin`）原由 `management/admin_service.py` 的 `AdminService` 产出脱敏文本、走 `@Command` 通道；命令精简后服务层保留，生产消费者只剩 WebUI 与私有 API；
 - **WebUI 后台**：插件目录下的声明式 `webui.json`（7 页）+ `plugin.py` 里 11 个 `public=False` 的 `@API` 只读数据源，由宿主 dashboard 渲染。
 
-两者唯一的共享代码是 `AdminService.snapshot()`：`webui_admin_summary` 复用它取概览/群组/来源三段（`plugin.py:2692-2712`），私有 API `admin_snapshot` 也复用它（`plugin.py:2182`）。改 `AdminService` 的输出等于同时改两张脸，这是本章最重要的耦合点。
+WebUI 页面与私有 API 唯一的共享代码是 `AdminService.snapshot()`：`webui_admin_summary` 复用它取概览/群组/来源三段（`plugin.py:2509-2529`），私有 API `admin_snapshot` 也复用它（`plugin.py:1995`）。改 `AdminService` 的输出等于同时改这两个出口，这是本章最重要的耦合点。
 
 ### 9.2 管理服务 AdminService 与聚合命令
 
@@ -3413,14 +3381,14 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 | 出口 | 入口 | 默认 limit | 说明 |
 |---|---|---|---|
 | `snapshot()` | 私有 API `admin_snapshot`（`plugin.py:2177-2182`） | 20 | 保留给 Host 鉴权桥或插件自身，注释明确「不作为其他插件可调用的公共 API」（`plugin.py:2179`） |
-| `format_text()` | 命令 `/麦麦管理`（`plugin.py:1985-1995`） | 12 | 把各 scope 渲染成可复制纯文本（`management/admin_service.py:131-197`） |
+| `format_text()` | 原命令 `/麦麦管理`（v1.23.0 已移除） | 12 | 把各 scope 渲染成可复制纯文本（`management/admin_service.py:131-197`）；命令移除后仅剩测试守卫消费 |
 
 各 scope 的数据来源与脱敏层次：
 
 - `users`（`management/admin_service.py:70-78`）：`store.list_users()`，只取角色/温度/主动额度/时间戳，**不含 stream_id 与聊天原文**（测试钉死：`tests/test_management.py:54-60`）。
 - `groups`（`management/admin_service.py:80-89`）：配置里的 `config.social.groups` 与 `store.list_group_directory(500)` 缓存按 `group_id` 合并；stream 只以布尔 `stream_known` 出现，不给 stream_id。
 - `dates`（`management/admin_service.py:57`）：直接透传 `store.management_date_candidates(limit)`。
-- `sources`（`management/admin_service.py:91-110`）：配置侧 `config.search_api.providers` 与持久化健康态 `store.search_provider_health()` 按 `(provider_id, key_fingerprint)` 对齐；Key 只出指纹、状态、冷却截止与错误分类。**⚠ 这个对齐当前是失效的（读码确认的隐患，非推测）**：`AdminService._provider_id` 的签名只有 `类型:端点:模型`（`management/admin_service.py:32-34`），而写入/读取 `search_key_runtime` 的 `SearchService._provider_id` 签名还含 `browser_engine:headless`（`information/search_service.py:78-82`，运行态写入方见 `information/search_service.py:83-85`、`:267-268`）。两侧 `provider_id` 永远不同，`runtime.get((provider_id,fingerprint),{})`（`management/admin_service.py:99`）永远落到默认空字典——因此 `/麦麦管理 来源` 与 `webui_admin_summary` 的 Key 状态/冷却截止/失败数会**永远显示 `healthy`/0/空**。排障「Key 已经冷却但管理页看不出来」时要知道这是两侧口径不一致的 bug，而不是运行态没写进去；同理 WebUI 里 `keys` 段（直连 store，SearchService 口径）与 `sources.providers` 段（AdminService 口径）的 `provider_id` 也无法互相 join（§9.4）。修复方向（本文未实施）：让两侧共用同一个 `_provider_id` 实现。
+- `sources`（`management/admin_service.py:91-110`）：配置侧 `config.search_api.providers` 与持久化健康态 `store.search_provider_health()` 按 `(provider_id, key_fingerprint)` 对齐；Key 只出指纹、状态、冷却截止与错误分类。**⚠ 这个对齐当前是失效的（读码确认的隐患，非推测）**：`AdminService._provider_id` 的签名只有 `类型:端点:模型`（`management/admin_service.py:32-34`），而写入/读取 `search_key_runtime` 的 `SearchService._provider_id` 签名还含 `browser_engine:headless`（`information/search_service.py:78-82`，运行态写入方见 `information/search_service.py:83-85`、`:267-268`）。两侧 `provider_id` 永远不同，`runtime.get((provider_id,fingerprint),{})`（`management/admin_service.py:99`）永远落到默认空字典——因此 WebUI「系统与配置」页来源段与 `webui_admin_summary` 的 Key 状态/冷却截止/失败数会**永远显示 `healthy`/0/空**。排障「Key 已经冷却但管理页看不出来」时要知道这是两侧口径不一致的 bug，而不是运行态没写进去；同理 WebUI 里 `keys` 段（直连 store，SearchService 口径）与 `sources.providers` 段（AdminService 口径）的 `provider_id` 也无法互相 join（§9.4）。修复方向（本文未实施）：让两侧共用同一个 `_provider_id` 实现。
 - `bookshelf`（`management/admin_service.py:59-61`）：`store.management_bookshelf` 只返回元数据——SQL 层就不 SELECT 正文/修订（`core/storage.py:1949-1957`，注释：「管理摘要不返回正文和修订内容，降低误暴露私密文本的风险」）；另附 `management_creation_runs`。
 - `tokens`（`management/admin_service.py:112-115`）：当日 0 点起的 `usage_summary` + `search_api_summary`。
 - `proactive`（`management/admin_service.py:63-65`）：待处理候选 + 当日 `proactive_skip_summary`（跳过原因统计）。
@@ -3438,13 +3406,11 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 
 存储层、聚合层、渲染层三层各自减责：存储层的 `management_*` 方法不取正文，`AdminService` 不取凭据，`format_text` 只消费已脱敏 dict（`management/admin_service.py:132` 注释：「保持敏感字段已经脱敏」）。
 
-#### 聚合命令 `/麦麦管理`
+#### 聚合命令 `/麦麦管理`（v1.23.0 已移除）
 
-注册于 `plugin.py:1985`，pattern 同时接受中文 scope 与旧英文 scope（`plugin.py:1985`）：`概览→overview`、`用户→users`、`群聊→groups`、`日期→dates`、`来源→sources`、`书柜→bookshelf`、`统计→tokens`、`主动→proactive`、`搜索→search`（别名表 `plugin.py:44-47`，测试钉死中文映射：`tests/test_command_menu.py:143-144`）。菜单只展示中文范围，英文 scope 在这里归一化后兼容（`plugin.py:1991-1993` 注释）。
+命令已于 v1.23.0 移除（原注册于 `plugin.py:1985`，改动前快照）：pattern 同时接受中文 scope 与旧英文 scope，经 `ADMIN_SCOPE_ALIASES` 归一化（别名表与中文映射测试随命令一同删除）。访问控制是双闸：`_command_access` 要求**私聊**且是已启用用户或显式管理员，群聊始终拒绝（`plugin.py:1724`）；`_is_owner_or_admin` 再要求 owner 角色或 `admin_user_ids` 命中（`plugin.py:1710`）。`admin_user_ids` 为空时回落取第一个启用 profile（`plugin.py:1705-1707`）——冷启动没配管理员时行为要知道。被拒提示带 `ADMIN_IDS_HINT` 引导补管理员（`plugin.py:44`）。
 
-访问控制是双闸：`_command_access` 要求**私聊**且是已启用用户或显式管理员，群聊始终拒绝（`plugin.py:1734-1741`）；`_is_owner_or_admin` 再要求 owner 角色或 `admin_user_ids` 命中（`plugin.py:1720-1723`）。`admin_user_ids` 为空时回落取第一个启用 profile（`plugin.py:1714-1718`）——冷启动没配管理员时行为要知道。被拒提示带 `ADMIN_IDS_HINT` 引导补管理员（`plugin.py:50`、`plugin.py:1989`）。
-
-`format_text` 的分 scope 排版有几个刻意的产品决策，改文本时别破坏：
+指令精简后 `format_text()` 失去命令入口、仅剩测试守卫消费（`tests/test_fixes.py`、`tests/test_management.py`）；scope 白名单与 `snapshot()` 仍由 WebUI「系统与配置」页和私有 API `admin_snapshot` 消费（§9.1）。`format_text` 的分 scope 排版有几个刻意的产品决策，改文本时别破坏：
 
 - Playwright 来源显示「浏览器（无需 Key）」而不是「Key 0」——否则会被误读成配置缺失（`management/admin_service.py:153-156` 注释）。
 - `tokens` scope 两类数据都空时只输出一句「今日暂无模型调用。」，不给光杆标题（`management/admin_service.py:162-164`）。
@@ -3525,7 +3491,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 - **manifest 是插件的注册元数据**（`manifest_version: 2`，`_manifest.json:2`），`display.icon` 是其中一个**可选**字段——按 maibot-plugin-dev 技能的清单，必填字段里没有它，它与 `plugin_type`、`changelog` 同列「可选但常用」（外部技能文档 `~/.agents/skills/maibot-plugin-dev/SKILL.md:69`，非仓库文件；本会话未读宿主源码验证其解析逻辑，**未确认**）。
 - **它只影响宿主 chrome 里的插件形象**（插件列表/管理入口的图标）：`type:"local"` + `value:"mailife.png"` 表示图标文件在插件根目录、相对 `_manifest.json` 定位；`fallback:"fish"` 是本地图加载失败时的 lucide 兜底图标名；`background:"#BFE3F2"` 是图标底色。
 - **与 webui.json 无关**：页面图标走每页自己的 `icon` 字段，且被限制在 `puzzle/chart/settings/database/list` 五个枚举值内（`docs/webui-extension.md:32`）；首页卡片图标是另一套命名图标机制（`plugin.py:2754` 的 `icon="heart-pulse"`）。`webui.json` 全文不引用 `mailife.png`——实测 0 个 `image` 组件，麦麦头像不会出现在任何页面里。
-- 图标文件实测：PNG 签名合法，512×512、8 位、RGBA（color_type 6）、372348 字节 ≈ 363.6 KiB，画面是水蓝底色中的橙色胡萝卜形吉祥物（与 `background` 色一致）。`CHANGELOG.md:5-10` 记录 v1.22.1 新增该字段，并把图标从 1254×1254/1.7MB 压到 512×512/363KB 以降低插件列表加载开销——同一次变更还把 `plugin_type` 从 `tool` 改为 `extension`、把 `host_application.max_version` 从 `1.99.99` 收窄为 `1.3.99`（`_manifest.json:12-15`）。
+- 图标文件实测：PNG 签名合法，512×512、8 位、RGBA（color_type 6）、372348 字节 ≈ 363.6 KiB，画面是水蓝底色中的橙色胡萝卜形吉祥物（与 `background` 色一致）。`CHANGELOG.md:27-33` 记录 v1.22.1 新增该字段，并把图标从 1254×1254/1.7MB 压到 512×512/363KB 以降低插件列表加载开销——同一次变更还把 `plugin_type` 从 `tool` 改为 `extension`、把 `host_application.max_version` 从 `1.99.99` 收窄为 `1.3.99`（`_manifest.json:12-15`）。
 
 **容易踩的坑**：`value` 是相对路径，重命名/移动 `mailife.png` 而不改 manifest，图标会静默 fallback 到 `fish`；反过来在 `webui.json` 里手写 `<image>` 绑这个 PNG 是行不通的（协议 2 的 `image` 组件只接受数据引用且返回受限 data URL，`docs/webui-extension.md:60`）。
 
@@ -3566,7 +3532,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 6. **`webui.json` 114.2 KiB / 128 KiB** 上限，大段全文塞进组件树前先算字节。
 7. **改 API 输出必须三同步**：`plugin.py` 方法 → 测试断言 → `docs/webui-extension.md` §6 契约表（`docs/webui-development.md:86-88`）。
 8. **`admin_snapshot` 是私有的**，`public=False`，别当跨插件 API 引用（`plugin.py:2179`）。
-9. **`/麦麦管理` scope 拼错静默回落 overview**（`management/admin_service.py:52-53`），排查「数据不对」时先看是不是 scope 没匹配上。
+9. **管理 scope 拼错静默回落 overview**（`management/admin_service.py:52-53`），排查「数据不对」时先看是不是 scope 没匹配上（v1.23.0 起经 WebUI 与私有 API 传参）。
 10. **每插件并发 WebUI 请求 2、API 超时 10 秒、响应 ≤512 KiB**（`docs/webui-extension.md:111-113`）；11 个 API 全是纯本地聚合正是为了稳过超时。
 
 **本章未覆盖/未确认**：宿主 MaiBot 仓库的 WebUI schema 校验模块实际模型（17 vs 18 组件、512 KiB 等上限的强制执行方式）、`docs/webui-development.md:43` 提到的校验脚本（位于插件目录之外，当前工作区内已无该文件，存在与用法仅转引自开发篇，未确认）、部署目录实测、任何测试或校验脚本的运行结果——本章为纯静态勘察，未执行任何检查。
@@ -3692,7 +3658,7 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
   → 契机经 add_opportunity 进 proactive_opportunities，由 patrol 评分（§6.7）与 Planner 终审
 ```
 
-书柜的另一条写入旁路是日记镜像：`save_diary` 同事务双写 `diary_entries` 与书柜文档/修订（`core/storage.py:2090-2114`），因此日记也出现在 `/麦麦书柜` 与 WebUI 内心世界页（§6.4、§8.2）。
+书柜的另一条写入旁路是日记镜像：`save_diary` 同事务双写 `diary_entries` 与书柜文档/修订（`core/storage.py:2090-2114`），因此日记也以书柜文档形态出现在 WebUI 内心世界页（§6.4、§8.2）。
 
 ---
 
@@ -3881,8 +3847,8 @@ Planner 请求前（on_planner，plugin.py:1273-1274）
 
 | 版本 | 位置 | 升的条件 |
 |---|---|---|
-| 插件版本 `1.22.1` | `config.py:15`（消费点见 §2.5） | 每次发布 |
-| 清单版本 `1.22.1` | `_manifest.json:5` | 每次发布，与上一行手工同步 |
+| 插件版本 `1.23.0` | `config.py:15`（消费点见 §2.5） | 每次发布 |
+| 清单版本 `1.23.0` | `_manifest.json:5` | 每次发布，与上一行手工同步 |
 | 配置 Schema 版本 `1.11.0` | `config.py:16` | 配置结构变化时 |
 | WebUI 协议版本 `2` | `webui.json:2` | 随宿主协议破坏性变更 |
 
@@ -3941,7 +3907,6 @@ Planner 请求前（on_planner，plugin.py:1273-1274）
 8. `proactive:*` 不是 QQ 消息号，`set_reply` 必须置假（§5.15-11）。
 9. 无锚点发送不能误叫醒，降级关联只在恰有一个候选时（§5.15-12）。
 10. 改 `force_wake_terms` 同时改防抖立即结算行为（§5.14）。
-11. 菜单/结果卡渲染任何异常返回空，调用方必须备文本降级（§5.15-16）。
 
 **记忆与主动（§6）**
 
@@ -3979,7 +3944,7 @@ Planner 请求前（on_planner，plugin.py:1273-1274）
 3. 协议 2 黑名单组件一写就整插件注册拒绝（§9.7-4）。
 4. system 页 185/200 组件，只剩 15 余量（§9.7-5）。
 5. 改 API 输出必须三同步：方法 → 测试断言 → 扩展篇契约表（§9.7-7）。
-6. `/麦麦管理` scope 拼错静默回落 overview（§9.7-9）。
+6. 管理 scope 拼错静默回落 overview（§9.7-9）。
 7. `format_text` 与 `snapshot` 两个 limit 口径（12 vs 20，§9.2）。
 8. **管理页 Key 健康态永远显示 healthy/0**：AdminService 与 SearchService 的 `provider_id` 签名口径不同（后者多 `browser_engine:headless`），join 必然落空——「Key 冷却了但管理页看不出来」时先想这个（§9.2 sources 段、§9.4 `webui_admin_summary` 行）。
 
@@ -3992,7 +3957,7 @@ Planner 请求前（on_planner，plugin.py:1273-1274）
 3. **三道防线 + 墓碑先行**：撤回可能在任何异步间隙发生，所以 Replyer 输出后、发送前两次、持久查询层层复核，且 DB 查询异常时失败开放——宁可漏拦一次也不把用户消息全部静默（§5.1、§5.11）。
 4. **平台确认才结算**：主动额度、唤醒、转述状态全部以平台实际发送结果为事实，两段式唤醒杜绝「她没说话却醒了」的幽灵状态（§4.8、§6.8）。
 5. **隐私按角色分层**：日记 owner-only（朋友看到的是「无权读取」而不是「还没有」）、群摘要原文绝不入库且敏感内容模型前拒、Key 只出指纹、搜索词整词清洗、一切用户/外部内容以「不可信数据」框架注入——代价是功能默认关闭、排查线索变少（§6.10、§8.6、§7.4、§5.7）。
-6. **失败开放与降级链**：防抖异常放行、渲染失败降级文本、模型缺失走本地兜底、`_reloading` 期间消息不增强也不阻断——可用性优先于完整性（§2.7、§5.3）。
+6. **失败开放与降级链**：防抖异常放行、模型缺失走本地兜底、`_reloading` 期间消息不增强也不阻断——可用性优先于完整性（§2.7、§5.3）。
 7. **高危功能默认关闭 + 显式确认**：联网、社交、创作、绘图联动默认全关，创作还加 `plaintext_storage_acknowledged`——把「明文明文存储」的知情成本留给部署者（§2.3.17、§2.7）。
 8. **内存态限频可接受重启丢失**：绘图判定、外部阅读、连续性整理的限频都是进程内变量——换来零持久化复杂度，代价是重启后第一次必定放行（§11.5、§6.11-8）。
 9. **版本即契约**：配置 Schema 与插件版本分离、迁移写在字段级 before-validator、WebUI 协议版本是硬门槛——文档、模板、测试三处同步是发版清单的一部分（§2.4、§2.5、§12.1.5）。
@@ -4039,15 +4004,13 @@ Planner 请求前（on_planner，plugin.py:1273-1274）
 | `management/admin_service.py` | 9 scope 管理摘要与脱敏四件套 | §9.2 |
 | `messaging/__init__.py` | 消息包声明（docstring only） | §5 章首 |
 | `messaging/adapter_compat.py` | SnowLuma/NapCat 两套适配器归一化 | §5.10 |
-| `messaging/command_catalog.py` | 命令目录单一来源与纯文本降级 | §5.12.1 |
+| `messaging/command_catalog.py` | 命令目录单一来源与菜单文本生成 | §5.12.1 |
 | `messaging/command_reply.py` | 命令发送的流解析与多层兜底 | §5.12.5 |
-| `messaging/command_result_renderer.py` | 命令结果卡 PNG 渲染与分页 | §5.12.4 |
-| `messaging/menu_renderer.py` | 指令菜单 PNG 渲染（字体/量化/缓存） | §5.12.3 |
 | `messaging/message_pipeline.py` | 防抖收口、文本语义、身份识别 | §5.3、§5.10.4 |
 | `messaging/prompt_builder.py` | Planner/Replyer 背景注入与反注入框架 | §5.7 |
 | `messaging/recall_service.py` | 撤回登记、墓碑、摘要恢复、查询 | §5.11 |
 | `messaging/task_context.py` | 主动任务归因：标记解析、激活条件、三层预留 | §5.13 |
-| `plugin.py` | 入口：装配、7 Hook、22 命令、18 API、6 循环 | §1、§5、§10 |
+| `plugin.py` | 入口：装配、7 Hook、11 命令、18 API、6 循环 | §1、§5、§10 |
 | `social/__init__.py` | 导出 `GroupObserver`/`RelayService` | §8.1 |
 | `social/group_observer.py` | 群观察匿名摘要与群转私候选 | §8.6 |
 | `social/relay_service.py` | 显式转述全生命周期 | §8.6、§10.5 |

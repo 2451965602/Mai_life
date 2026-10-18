@@ -182,7 +182,7 @@ class CreationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(work),1); self.assertEqual(work[0]["target_user_id"],"1")
 
     async def test_read_reference_accepts_list_index_and_full_id(self):
-        """书柜阅读支持 /麦麦书柜 同源列表的序号；完整 ID 与权限过滤不受影响。"""
+        """书柜阅读支持同源列表的序号；完整 ID 与权限过滤不受影响。"""
         shelf=BookshelfService(self.store,self.config)
         owner=UserProfile(user_id="1",role="owner"); friend=UserProfile(user_id="2",role="friend")
         self.config.users.profiles=[owner]; await self.store.sync_users([owner])
@@ -190,7 +190,7 @@ class CreationTests(unittest.IsolatedAsyncioTestCase):
             "title":"公开作品","privacy":"public","status":"archived","created_at":1.0})
         await self.store.save_diary("2026-07-12","普通的一天","内容","平稳","digest",3.0)
         user=await self.store.get_user("1")
-        # 列表按最近更新排序，与 /麦麦书柜 展示一致：日记(3.0) 在前。
+        # 列表按最近更新排序，与 WebUI 书柜页展示一致：日记(3.0) 在前。
         rows=await shelf.list_for_user(user,20)
         self.assertEqual([row["id"] for row in rows],["diary:2026-07-12","work-public"])
         self.assertEqual(await shelf.resolve_reference("1",user),"diary:2026-07-12")

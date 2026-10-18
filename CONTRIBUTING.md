@@ -86,7 +86,7 @@ python -c "import json; json.load(open('_manifest.json',encoding='utf-8-sig'))" 
 ```
 Mai_life/
 ├── _manifest.json        # 插件清单：id/version/capabilities/dependencies（改完必须验 JSON 语法）
-├── plugin.py             # 入口：组合 17 个服务 + 注册 7 Hook / 2 Tool / 22 Command / 18 API / 1 HomeCard（约 1700 行）
+├── plugin.py             # 入口：组合 17 个服务 + 注册 7 Hook / 2 Tool / 11 Command / 18 API / 1 HomeCard（约 1700 行）
 ├── config.py             # Pydantic 配置模型（WebUI 中文字段 + i18n），PLUGIN_VERSION 常量在此
 ├── config.toml.example   # 配置模板；实际 config.toml 由 Runner 按 config_model 生成、WebUI 维护，已被 .gitignore 忽略（勿手改 config_version）
 ├── webui.json            # 声明式 WebUI 页面

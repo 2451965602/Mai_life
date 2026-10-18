@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import re
 import unittest
@@ -11,30 +10,17 @@ from typing import Any
 from Mai_life.config import MaiLifeSettings
 from Mai_life.messaging.command_catalog import COMMAND_SECTIONS,build_command_usage_text
 from Mai_life.messaging.command_reply import CommandReplyService
-from Mai_life.messaging.command_result_renderer import MaiLifeCommandResultRenderer,RenderedCommandPage
-from Mai_life.messaging.menu_renderer import MaiLifeMenuRenderer
-from Mai_life.plugin import ADMIN_SCOPE_ALIASES,MaiLifePlugin
+from Mai_life.plugin import MaiLifePlugin
 
 
 COMMAND_CASES:dict[str,tuple[str,str]]={
     "/麦麦":("/麦麦","/mai"),
     "/麦麦状态":("/麦麦状态","/mai_status"),
-    "/麦麦日程":("/麦麦日程","/mai_schedule"),
-    "/麦麦关系":("/麦麦关系","/mai_relation"),
-    "/麦麦撤回":("/麦麦撤回","/mai_recalled"),
-    "/麦麦日记":("/麦麦日记","/mai_diary"),
-    "/麦麦日期":("/麦麦日期","/mai_dates"),
     "/麦麦添加日期":("/麦麦添加日期 2026-08-01 生日","/mai_date_add 2026-08-01 生日"),
     "/麦麦删除日期":("/麦麦删除日期 1","/mai_date_remove 1"),
     "/麦麦确认日期":("/麦麦确认日期 1 2026-08-01","/mai_date_confirm 1 2026-08-01"),
-    "/麦麦新闻":("/麦麦新闻","/mai_news"),
-    "/麦麦探索":("/麦麦探索","/mai_explore"),
-    "/麦麦书柜":("/麦麦书柜","/mai_bookshelf"),
-    "/麦麦阅读":("/麦麦阅读 doc-1","/mai_read doc-1"),
     "/麦麦立即创作":("/麦麦立即创作","/mai_create_now"),
     "/麦麦转述":("/麦麦转述 123456 测试内容","/mai_relay 123456 测试内容"),
-    "/麦麦统计":("/麦麦统计","/mai_tokens"),
-    "/麦麦管理":("/麦麦管理 来源","/mai_admin sources"),
     "/麦麦配置":("/麦麦配置","/mai_config"),
     "/麦麦帮助":("/麦麦帮助","/mai_help"),
     "/麦麦重生日程":("/麦麦重生日程","/mai_regenerate_schedule"),
@@ -94,39 +80,14 @@ class DummyStore:
         return {"user_id":user_id,"enabled":True,"role":"friend"} if user_id=="10001" else {}
 
 
-class EmptyRenderer:
-    def render(self,*args:Any,**kwargs:Any)->bytes:
-        del args,kwargs
-        return b""
-
-
-class StaticRenderer:
-    def render(self,*args:Any,**kwargs:Any)->bytes:
-        del args,kwargs
-        return b"menu-png"
-
-
-class EmptyResultRenderer:
-    def render(self,*args:Any,**kwargs:Any)->tuple[RenderedCommandPage,...]:
-        del args,kwargs
-        return ()
-
-
-class StaticResultRenderer:
-    def __init__(self,page_count:int=1)->None:self.page_count=page_count
-
-    def render(self,text:str,**kwargs:Any)->tuple[RenderedCommandPage,...]:
-        del kwargs
-        return tuple(RenderedCommandPage(f"result-{index}".encode(),f"{text}｜第 {index + 1} 页")
-                     for index in range(self.page_count))
-
-
 class CommandCatalogTests(unittest.TestCase):
     def test_catalog_matches_registered_commands_and_text_is_plain(self):
         catalog={item.command.split()[0] for section in COMMAND_SECTIONS for item in section.items}
         components=MaiLifePlugin().get_components()
         registered={str(item.get("name") or "") for item in components if item.get("type")=="COMMAND"}
+        # v1.23.0 精简指令集后的口径：目录 9 项 + 菜单双名（/麦麦、/麦麦帮助）= 注册 11 条。
         self.assertEqual(catalog|{"/麦麦","/麦麦帮助"},registered)
+        self.assertEqual(len(catalog),9); self.assertEqual(len(registered),11)
         text=build_command_usage_text()
         for command in catalog:self.assertIn(command,text)
         self.assertNotIn("/mai",text)
@@ -140,47 +101,14 @@ class CommandCatalogTests(unittest.TestCase):
             pattern=str((components[name].get("metadata") or {}).get("command_pattern") or "")
             self.assertIsNotNone(re.fullmatch(pattern,chinese_sample),name)
             self.assertIsNotNone(re.fullmatch(pattern,legacy_sample),name)
-        self.assertEqual(ADMIN_SCOPE_ALIASES["群聊"],"groups")
-        self.assertEqual(ADMIN_SCOPE_ALIASES["统计"],"tokens")
+        # v1.23.0：ADMIN_SCOPE_ALIASES 随 /麦麦管理 删除，别名表断言一并移除。
 
-    def test_manifest_declares_local_image_and_stream_capabilities(self):
+    def test_manifest_declares_browse_web_image_and_stream_capabilities(self):
         manifest=json.loads((Path(__file__).parents[1]/"_manifest.json").read_text(encoding="utf-8-sig"))
-        self.assertEqual(manifest["version"],"1.22.1")
+        self.assertEqual(manifest["version"],"1.23.0")
+        # v1.23.0 移除 Pillow 生图链后，send.image 唯一消费者是 mai_life_browse_web 网页截图。
         self.assertIn("send.image",manifest["capabilities"])
         self.assertIn("chat.get_all_streams",manifest["capabilities"])
-
-    def test_renderer_makes_nonblank_cached_png(self):
-        renderer=MaiLifeMenuRenderer()
-        if not renderer.available or not renderer.regular_font_path:
-            self.skipTest("当前环境没有 Pillow 或可用中文字体")
-        bundled_font=Path(__file__).parents[1]/"assets"/"font.ttf"
-        system_youyuan=Path("C:/Windows/Fonts/SIMYOU.TTF")
-        if system_youyuan.is_file() and not bundled_font.is_file():
-            self.assertEqual(Path(renderer.regular_font_path).name.casefold(),"simyou.ttf")
-            self.assertEqual(Path(renderer.bold_font_path).name.casefold(),"simyou.ttf")
-        first=renderer.render("麦生活 · 指令中心",COMMAND_SECTIONS,version="1.11.0")
-        second=renderer.render("麦生活 · 指令中心",COMMAND_SECTIONS,version="1.11.0")
-        self.assertIs(first,second); self.assertGreater(len(first),10_000)
-        from PIL import Image
-        with Image.open(io.BytesIO(first)) as image:
-            self.assertEqual(image.format,"PNG"); self.assertEqual(image.width,renderer.WIDTH)
-            self.assertGreaterEqual(image.height,900)
-            extrema=image.convert("RGB").resize((64,64)).getextrema()
-            self.assertTrue(all(high-low>20 for low,high in extrema))
-
-    def test_result_renderer_paginates_long_text_and_caches_png_pages(self):
-        renderer=MaiLifeCommandResultRenderer()
-        if not renderer.available or not renderer.regular_font_path:
-            self.skipTest("当前环境没有 Pillow 或可用中文字体")
-        text="\n".join(f"第 {index + 1} 行｜"+("较长的状态说明"*10) for index in range(50))
-        first=renderer.render(text); second=renderer.render(text)
-        self.assertIs(first,second); self.assertGreater(len(first),1)
-        for page in first:
-            self.assertGreater(len(page.image_bytes),10_000); self.assertTrue(page.plain_text)
-            from PIL import Image
-            with Image.open(io.BytesIO(page.image_bytes)) as image:
-                self.assertEqual(image.format,"PNG"); self.assertEqual(image.width,renderer.WIDTH)
-                self.assertGreaterEqual(image.height,650)
 
 
 class CommandReplyTests(unittest.IsolatedAsyncioTestCase):
@@ -203,8 +131,9 @@ class CommandReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await service.resolve_live_stream_id("stale","10001"),"direct-live-stream")
 
     async def test_menu_commands_return_sdk_triples_and_text_fallback(self):
+        # v1.23.0 起菜单只有文本路径（Pillow 生图链已移除），此处守卫三元组与文本兜底。
         ctx=DummyContext(image_result=False); plugin=MaiLifePlugin(); plugin._set_context(ctx)
-        plugin._store=DummyStore(); plugin._menu_renderer=EmptyRenderer(); plugin._result_renderer=EmptyResultRenderer()
+        plugin._store=DummyStore()
         common={"user_id":"10001","group_id":"","stream_id":"stale","platform":"qq"}
         menu=await plugin.cmd_menu(**common,matched_groups={})
         help_result=await plugin.cmd_help(**common)
@@ -216,32 +145,34 @@ class CommandReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item["stream_id"]=="live-private" for item in ctx.send.texts))
         self.assertIn("未识别子命令",ctx.send.texts[-1]["text"])
 
-    async def test_menu_command_prefers_image_when_available(self):
+    async def test_menu_command_always_sends_text_without_images(self):
+        # 意图改变：v1.23.0 起命令菜单只发纯文本；本用例防图片路径被加回。
         ctx=DummyContext(); plugin=MaiLifePlugin(); plugin._set_context(ctx)
-        plugin._store=DummyStore(); plugin._menu_renderer=StaticRenderer()
+        plugin._store=DummyStore()
         result=await plugin.cmd_menu(
             user_id="10001",group_id="",stream_id="stale",platform="qq",matched_groups={},
         )
-        self.assertEqual(result,(True,"命令菜单图片已发送",2))
-        self.assertEqual(len(ctx.send.images),1); self.assertEqual(ctx.send.texts,[])
-        self.assertEqual(base64.b64decode(ctx.send.images[0][0]),b"menu-png")
+        self.assertEqual(result,(True,"指令结果已发送（文本降级）",2))
+        self.assertEqual(ctx.send.images,[])
+        self.assertIn("麦生活 · 指令中心",ctx.send.texts[-1]["text"])
 
     async def test_admin_without_user_profile_can_use_private_management_commands(self):
+        # v1.23.0：/麦麦管理、/麦麦关系 已删，改用保留的 /麦麦状态、/麦麦休息测试 守同一契约
+        # （owner 不被 admin_user_ids 锁死、无档案管理员可过 _command_access）。
         config=MaiLifeSettings.model_validate({"plugin":{"admin_user_ids":["90001"]}})
         ctx=DummyContext(image_result=False); plugin=MaiLifePlugin(); plugin._set_context(ctx)
         plugin.set_plugin_config(config.model_dump(mode="python"))
-        plugin._store=DummyStore(); plugin._menu_renderer=EmptyRenderer(); plugin._result_renderer=EmptyResultRenderer()
+        plugin._store=DummyStore()
         common={"user_id":"90001","group_id":"","stream_id":"admin-private","platform":"qq"}
 
         menu=await plugin.cmd_menu(**common,matched_groups={})
-        admin=await plugin.cmd_admin(**common,matched_groups={"scope":"概览"})
-        relation=await plugin.cmd_relation(**common)
+        admin=await plugin.cmd_status(**common)
+        relation=await plugin.cmd_rest_test(**common)
 
         self.assertTrue(menu[0]); self.assertTrue(admin[0]); self.assertTrue(relation[0])
         self.assertIn("麦生活 · 指令中心",ctx.send.texts[0]["text"])
-        self.assertEqual(ctx.send.texts[1]["text"],"管理服务尚未初始化。")
-        self.assertIn("管理员身份已生效",ctx.send.texts[2]["text"])
-        self.assertNotIn("私聊用户或私聊管理员",ctx.send.texts[2]["text"])
+        self.assertEqual(ctx.send.texts[1]["text"],"麦生活尚未初始化。")
+        self.assertIn("服务尚未初始化。",ctx.send.texts[2]["text"])
 
         await plugin.cmd_menu(
             user_id="90001",group_id="12345",stream_id="group-stream",platform="qq",matched_groups={},
@@ -252,120 +183,26 @@ class CommandReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("私聊用户或私聊管理员",ctx.send.texts[-2]["text"])
         self.assertIn("私聊用户或私聊管理员",ctx.send.texts[-1]["text"])
 
-    async def test_regular_command_output_prefers_rendered_images(self):
+    async def test_regular_command_output_sends_text_only(self):
+        # 意图改变：v1.23.0 起指令结果只发纯文本；本用例防结果卡图片路径被加回。
         ctx=DummyContext(); plugin=MaiLifePlugin(); plugin._set_context(ctx)
-        plugin._store=DummyStore(); plugin._result_renderer=StaticResultRenderer(page_count=2)
+        plugin._store=DummyStore()
         result=await plugin.cmd_status(
             user_id="10001",group_id="",stream_id="stale",platform="qq",
         )
-        self.assertEqual(result,(True,"指令结果图片已发送（2 页）",2))
-        self.assertEqual([base64.b64decode(item[0]) for item in ctx.send.images],[b"result-0",b"result-1"])
-        self.assertEqual(ctx.send.texts,[])
+        self.assertEqual(result,(True,"指令结果已发送（文本降级）",2))
+        self.assertEqual(ctx.send.images,[])
+        self.assertIn("麦生活尚未初始化",ctx.send.texts[-1]["text"])
 
-    async def test_result_image_failure_falls_back_to_original_text(self):
-        ctx=DummyContext(image_result=False); plugin=MaiLifePlugin(); plugin._set_context(ctx)
-        plugin._store=DummyStore(); plugin._result_renderer=StaticResultRenderer()
+    async def test_regular_command_sends_original_text(self):
+        # 断言原样保留：退化后返回值恰为 (True,"指令结果已发送（文本降级）",2)（D4 文案保留）。
+        ctx=DummyContext(); plugin=MaiLifePlugin(); plugin._set_context(ctx)
+        plugin._store=DummyStore()
         result=await plugin.cmd_status(
             user_id="10001",group_id="",stream_id="stale",platform="qq",
         )
         self.assertEqual(result,(True,"指令结果已发送（文本降级）",2))
         self.assertIn("麦生活尚未初始化",ctx.send.texts[-1]["text"])
-
-    async def test_partial_page_failure_only_falls_back_to_remaining_text(self):
-        # 第一页成功；第二页的实时 stream 与原始 stream 两次图片发送均失败。
-        ctx=DummyContext(image_result=False,image_results=[True,False,False])
-        plugin=MaiLifePlugin(); plugin._set_context(ctx)
-        plugin._store=DummyStore(); plugin._result_renderer=StaticResultRenderer(page_count=2)
-        result=await plugin.cmd_status(
-            user_id="10001",group_id="",stream_id="stale",platform="qq",
-        )
-        self.assertEqual(result,(True,"指令结果已发送（后续页面降级为文本）",2))
-        self.assertIn("第 2 页",ctx.send.texts[-1]["text"])
-        self.assertNotIn("第 1 页",ctx.send.texts[-1]["text"])
-
-
-# ==========v1.14.10==========
-# 无中文字体时降级纯文本（不再发豆腐块图）+ 字体对象缓存。
-
-
-class NoFontRenderer(MaiLifeMenuRenderer):
-    """模拟系统没有任何中文字体：字体解析返回空路径（Pillow 本身可用）。"""
-
-    def _find_font_paths(self,font_path:str="")->tuple[str,str]:
-        return "",""
-
-
-class NoFontResultRenderer(MaiLifeCommandResultRenderer):
-    def _find_font_paths(self,font_path:str="")->tuple[str,str]:
-        return "",""
-
-
-class RendererFontGateTests(unittest.TestCase):
-    """v1.14.10 修复 1：无字体时渲染入口直接返回空，交给既有文本降级链。"""
-
-    def test_no_font_menu_returns_empty_bytes(self):
-        renderer=NoFontRenderer()
-        self.assertEqual(renderer.regular_font_path,"")
-        self.assertTrue(renderer.available)  # Pillow 可导入，缺的只是字体
-        self.assertIn("未找到中文字体",renderer.last_error)
-        self.assertEqual(renderer.render("麦生活 · 指令中心",COMMAND_SECTIONS,version="1.14.10"),b"")
-
-    def test_no_font_result_renderer_returns_empty_pages(self):
-        renderer=NoFontResultRenderer()
-        self.assertEqual(renderer.render("任意结果",title="麦生活 · 指令结果"),())
-
-
-class NoFontPluginFallbackTests(unittest.IsolatedAsyncioTestCase):
-    async def test_menu_command_falls_back_to_text_without_font(self):
-        ctx=DummyContext(); plugin=MaiLifePlugin(); plugin._set_context(ctx)
-        plugin._store=DummyStore()
-        plugin._menu_renderer=NoFontRenderer(); plugin._result_renderer=NoFontResultRenderer()
-        result=await plugin.cmd_menu(user_id="10001",group_id="",stream_id="stale",platform="qq",matched_groups={})
-        self.assertTrue(result[0]); self.assertEqual(result[2],2)
-        self.assertEqual(ctx.send.images,[])
-        self.assertTrue(any("麦生活 · 指令中心" in item["text"] for item in ctx.send.texts))
-
-    async def test_regular_command_falls_back_to_text_without_font(self):
-        ctx=DummyContext(); plugin=MaiLifePlugin(); plugin._set_context(ctx)
-        plugin._store=DummyStore()
-        plugin._menu_renderer=NoFontRenderer(); plugin._result_renderer=NoFontResultRenderer()
-        result=await plugin.cmd_status(user_id="10001",group_id="",stream_id="stale",platform="qq")
-        self.assertEqual(result[2],2)
-        self.assertEqual(ctx.send.images,[])
-        self.assertTrue(ctx.send.texts)
-
-
-class RendererFontCacheTests(unittest.TestCase):
-    """v1.14.10 修复 2：字体对象按 (字号,粗体) 缓存，冷渲染不再重复解析字体文件。"""
-
-    def setUp(self):
-        self.renderer=MaiLifeMenuRenderer()
-        if not self.renderer.available or not self.renderer.regular_font_path:
-            self.skipTest("当前环境没有 Pillow 或可用中文字体")
-
-    def test_font_objects_are_cached_per_size(self):
-        first=self.renderer._font(20,bold=True)
-        self.assertIs(first,self.renderer._font(20,bold=True))
-        self.assertIsNot(first,self.renderer._font(44,bold=True))
-
-    def test_repeated_cold_renders_do_not_reload_fonts(self):
-        import Mai_life.messaging.menu_renderer as menu_module
-        real_truetype=menu_module.ImageFont.truetype
-        calls={"n":0}
-        def counting(path,*,size):
-            calls["n"]+=1
-            return real_truetype(path,size=size)
-        menu_module.ImageFont.truetype=counting
-        try:
-            self.renderer._font_cache.clear(); self.renderer._cache.clear()
-            self.renderer.render("麦生活 · 指令中心",COMMAND_SECTIONS,version="cold-render")
-            self.assertGreater(calls["n"],0)
-            after_first=calls["n"]
-            self.renderer._cache.clear()  # 清掉 PNG 缓存，强制完整重渲（字体缓存保留）
-            self.renderer.render("麦生活 · 指令中心",COMMAND_SECTIONS,version="cold-render")
-            self.assertEqual(calls["n"],after_first)  # 第二次冷渲染零字体加载
-        finally:
-            menu_module.ImageFont.truetype=real_truetype
 
 
 if __name__=="__main__":unittest.main()

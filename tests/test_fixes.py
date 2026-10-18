@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
 import math
 import os
@@ -43,8 +42,6 @@ from Mai_life.life.rest_gate import BLOCK_REASON, RestGate
 from Mai_life.life.schedule_service import ScheduleService
 from Mai_life.management.admin_service import AdminService
 from Mai_life.messaging.adapter_compat import recall_notice
-from Mai_life.messaging.command_catalog import COMMAND_SECTIONS
-from Mai_life.messaging.menu_renderer import MaiLifeMenuRenderer
 from Mai_life.messaging.message_pipeline import MessageDebouncer
 from Mai_life.messaging.prompt_builder import PromptBuilder
 from Mai_life.messaging.recall_service import RecallService
@@ -443,9 +440,10 @@ class DocContractTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         source = (root / "plugin.py").read_text(encoding="utf-8-sig", errors="replace")
         count = len(re.findall(r"^\s*@Command\(", source, flags=re.MULTILINE))
-        self.assertEqual(count, 22)
+        # v1.23.0 精简指令集：22 条命令收敛为保留的 11 条（删 11 条查询类命令）。
+        self.assertEqual(count, 11)
         doc = (root / "CONTRIBUTING.md").read_text(encoding="utf-8-sig", errors="replace")
-        self.assertIn("22 Command", doc,
+        self.assertIn("11 Command", doc,
                       "CONTRIBUTING.md 的命令数与 plugin.py 实际不符，请同步")
         readme = (root / "README.md").read_text(encoding="utf-8-sig", errors="replace")
         for name in ("/麦麦帮助", "/麦麦立即创作", "/麦麦休息测试", "/麦麦重生日程"):
@@ -1412,28 +1410,28 @@ class CommandFixTests(unittest.IsolatedAsyncioTestCase):
     def _sent_texts(ctx:DummyContext)->list[str]:
         return [str(item.get("text") or "") for item in ctx.send.texts]
 
-    # P2-11：admin_user_ids 配为他人时，主人（档案 role=owner）不应被五条管理命令锁出。
+    # P2-11：admin_user_ids 配为他人时，主人（档案 role=owner）不应被命令锁出。
+    # v1.23.0：/麦麦管理、/麦麦统计 已删，换用保留命令（/麦麦、/麦麦状态）守同一契约。
     async def test_owner_passes_management_commands_when_admin_ids_points_elsewhere(self):
         config=MaiLifeSettings.model_validate({"plugin":{"admin_user_ids":["99999"]}})
         plugin,ctx=await self._build_plugin(config,[UserProfile(user_id="10001",role="owner")])
         common={"user_id":"10001","group_id":"","stream_id":"stream-10001","platform":"qq"}
         results=[
-            await plugin.cmd_admin(**common,matched_groups={"scope":"概览"}),
+            await plugin.cmd_menu(**common,matched_groups={}),
             await plugin.cmd_create_now(**common),
-            await plugin.cmd_tokens(**common),
+            await plugin.cmd_status(**common),
             await plugin.cmd_regenerate(**common),
             await plugin.cmd_rest_test(**common),
         ]
         for result in results:
             self.assertEqual(len(result),3); self.assertEqual(result[2],2); self.assertTrue(result[0])
         texts=self._sent_texts(ctx)
-        self.assertTrue(any("管理概览" in text for text in texts))
+        self.assertTrue(any("指令中心" in text for text in texts))
         self.assertTrue(any("书柜创作未启用" in text for text in texts))
         self.assertFalse(any("只有私聊管理员" in text for text in texts))
         # 无档案的管理员 90001 仍可过（既有契约：_command_access 不变）。
         admin_results=[
-            await plugin.cmd_admin(user_id="90001",group_id="",stream_id="admin-private",platform="qq",
-                                   matched_groups={"scope":"概览"}),
+            await plugin.cmd_status(user_id="90001",group_id="",stream_id="admin-private",platform="qq"),
             await plugin.cmd_create_now(user_id="90001",group_id="",stream_id="admin-private",platform="qq"),
         ]
         for result in admin_results:self.assertTrue(result[0])
@@ -1555,19 +1553,6 @@ class CommandFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reset_calls,[])
         current=await plugin._active_tasks.current("stream-10001",time.time())
         self.assertIsNotNone(current); self.assertEqual(current.task_id,HOST_TASK_PREFIX+"900")
-
-    # P3-30：菜单 PNG 量化后体积低于 150KB。
-    def test_menu_png_is_quantized_below_150kb(self):
-        renderer=MaiLifeMenuRenderer()
-        if not renderer.available or not renderer.regular_font_path:
-            self.skipTest("当前环境没有 Pillow 或可用中文字体")
-        png=renderer.render("麦生活 · 指令中心",COMMAND_SECTIONS,version="1.14.4")
-        self.assertGreater(len(png),10_000); self.assertLess(len(png),150_000)
-        Path(self.tmp.name,"menu_v1144.png").write_bytes(png)
-        from PIL import Image
-        with Image.open(io.BytesIO(png)) as image:
-            self.assertEqual(image.format,"PNG"); self.assertEqual(image.width,renderer.WIDTH)
-            self.assertGreaterEqual(image.height,900)
 
 
 class AdminTextFixTests(unittest.IsolatedAsyncioTestCase):
