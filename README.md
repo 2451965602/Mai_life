@@ -16,7 +16,7 @@
 
 输入 `/麦麦` 或 `/麦麦帮助` 会返回纯文本指令菜单。自 v1.23.0 起插件不再本地渲染菜单图片（Pillow 生图链已整体移除），未识别的指令也会落进同一菜单兜底，不会报错。
 
-### 安装 Chromium、chinese-calendar、lunar-python（可选）
+### 安装 Chromium（可选）、chinese-calendar（可选）、lunar-python（可选）
 
 playwright 这个 Python 包已写入 _manifest.json 的 dependencies，MaiBot 加载插件时会自动安装；但另外两个 Python 库（chinese-calendar、lunar-python）以及 Chromium 浏览器二进制需要手动安装一次。
 
