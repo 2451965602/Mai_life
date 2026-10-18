@@ -712,8 +712,8 @@ class StubBrowseInformation:
 
 class StubCommandReplies:
     def __init__(self,sent:bool=True)->None:self.sent=sent; self.calls:list[dict[str,object]]=[]
-    async def send_image_bytes_with_fallback(self,image_bytes:bytes,stream_id:str,user_id:str|None=None,platform:str|None=None)->bool:
-        self.calls.append({"image_bytes":image_bytes,"stream_id":stream_id,"user_id":user_id,"platform":platform})
+    async def send_image_bytes_with_fallback(self,image_bytes:bytes,stream_id:str,user_id:str|None=None,group_id:str|None=None,platform:str|None=None)->bool:
+        self.calls.append({"image_bytes":image_bytes,"stream_id":stream_id,"user_id":user_id,"group_id":group_id,"platform":platform})
         return self.sent
 
 
@@ -735,7 +735,15 @@ class BrowseWebToolTests(unittest.IsolatedAsyncioTestCase):
         result=await plugin.tool_browse_web(url="https://example.com",user_id="1",stream_id="s1",platform="qq")
         self.assertTrue(result["success"]); self.assertIn("截图",result["content"])
         self.assertEqual(information.calls,["https://example.com"])
-        self.assertEqual(replies.calls,[{"image_bytes":png,"stream_id":"s1","user_id":"1","platform":"qq"}])
+        self.assertEqual(replies.calls,[{"image_bytes":png,"stream_id":"s1","user_id":"1","group_id":"","platform":"qq"}])
+
+    async def test_browse_web_tool_routes_group_screenshot_with_group_id(self):
+        png=b"\x89PNG\r\n\x1a\nfake-screenshot"
+        plugin,information,replies=self._plugin(png,sent=True)
+        result=await plugin.tool_browse_web(url="https://example.com",user_id="1",stream_id="g1",group_id="100",platform="qq")
+        self.assertTrue(result["success"]); self.assertIn("截图",result["content"])
+        self.assertEqual(information.calls,["https://example.com"])
+        self.assertEqual(replies.calls,[{"image_bytes":png,"stream_id":"g1","user_id":"1","group_id":"100","platform":"qq"}])
 
     async def test_browse_web_tool_rejects_non_http_url(self):
         plugin,information,replies=self._plugin(b"x",sent=True)

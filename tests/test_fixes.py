@@ -303,12 +303,12 @@ class PluginFixTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.store.close(); self.tmp.cleanup()
 
-    async def test_browse_tool_is_restricted_to_private_scope(self):
+    async def test_browse_tool_is_available_in_group_and_private_scopes(self):
         plugin = _plugin(self.store, self.config)
         components = plugin.get_components()
         scopes = {str(item.get("name")): str(item.get("chat_scope") or "all")
                   for item in components}
-        self.assertEqual(scopes.get("mai_life_browse_web"), "private")
+        self.assertEqual(scopes.get("mai_life_browse_web"), "all")
         self.assertEqual(scopes.get("mai_life_web_search"), "all")
 
     async def test_group_recall_context_hides_message_ids(self):

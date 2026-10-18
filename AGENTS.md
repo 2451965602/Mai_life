@@ -14,7 +14,7 @@ PYTHONPATH="D:/MaiBot/plugin/maibot-plugin-sdk-2.8.2;D:/MaiBot/plugin" \
   -m unittest discover -s Mai_life/tests
 ```
 
-- 全量 539 个测试、100 秒内跑完。**提交前必须全绿**，没有例外。
+- 全量 540 个测试、100 秒内跑完。**提交前必须全绿**，没有例外。
 - 单独跑一个模块：把 `discover -s Mai_life/tests` 换成 `Mai_life.tests.test_core` 这类模块路径。
 - 部署环境验证（用宿主自带 Python + 真实 maibot_sdk，用于确认 SDK 兼容性）：
   `"C:/Users/octmicy/AppData/Roaming/MaiBotOneKeyDesktop/0163381a22cb/python-env/python.exe"`，cwd 同上，**不需要 PYTHONPATH**。

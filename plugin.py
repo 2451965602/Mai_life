@@ -1,4 +1,4 @@
-"""Mai_life v1.23.0 插件入口。"""
+"""Mai_life v1.23.1 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -218,7 +218,7 @@ class MaiLifePlugin(MaiBotPlugin):
                     self._bedtime))
 
     def get_components(self)->list[dict[str,Any]]:
-        """组件聊天作用域：截图会直接向当前会话发图，mai_life_browse_web 仅限私聊。
+        """组件聊天作用域：截图会直接向当前会话发图，mai_life_browse_web 群聊/私聊均可用（v1.23.1 起放开）。
 
         chat_scope 必须写在组件声明顶层（Host 注册时顶层优先于 metadata），
         与 @Tool 装饰器参数无关，唯一可靠方式是重写本方法。
@@ -226,7 +226,7 @@ class MaiLifePlugin(MaiBotPlugin):
         components=super().get_components()
         for component in components:
             if str(component.get("name") or "")=="mai_life_browse_web":
-                component["chat_scope"]="private"
+                component["chat_scope"]="all"
         return components
 
     def _resolve_data_dir(self,plugin_root:str)->str:
@@ -1656,7 +1656,7 @@ class MaiLifePlugin(MaiBotPlugin):
                      "不要主动对搜索结果或聊天中提到的网页截图；不确定时只用文字回答或改用联网搜索。"
                      "调用后会打开网页、截图，并把截图作为图片发送给当前对话的用户。"),
         detailed_description=("截图会作为可见图片直接发给用户，触发必须来自用户的明确请求，"
-                              "不要用猜测或好意代替用户要求。仅支持公网 http/https 地址，会拒绝内网地址；"
+                              "不要用猜测或好意代替用户要求；群聊中截图对全群可见，更要谨慎。仅支持公网 http/https 地址，会拒绝内网地址；"
                               "打开失败、截图失败或发送失败会返回失败说明。不要对同一网页重复截图，"
                               "也不要在一轮对话中连续截多张网页图。"),
         parameters=[
@@ -1677,7 +1677,7 @@ class MaiLifePlugin(MaiBotPlugin):
             return {"success":False,"content":"请提供完整的 http/https 网页地址。"}
         user_id=str(kwargs.get("user_id") or "")
         stream_id=str(kwargs.get("stream_id") or kwargs.get("chat_id") or "")
-        platform=str(kwargs.get("platform") or "qq")
+        platform=str(kwargs.get("platform") or "qq"); group_id=str(kwargs.get("group_id") or "")
         try:
             image_bytes=await self._information.browse_screenshot(url)
         except Exception as exc:
@@ -1694,7 +1694,7 @@ class MaiLifePlugin(MaiBotPlugin):
         if not image_bytes:
             return {"success":False,"content":"网页截图内容为空。"}
         sent=await self._command_replies.send_image_bytes_with_fallback(
-            image_bytes,stream_id,user_id=user_id,platform=platform,
+            image_bytes,stream_id,user_id=user_id,group_id=group_id,platform=platform,
         )
         if not sent:
             return {"success":False,"content":"截图成功但发送失败，请稍后重试。"}
