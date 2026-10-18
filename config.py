@@ -12,7 +12,7 @@ import re
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import ValidationInfo, field_validator, model_validator
 
-PLUGIN_VERSION = "1.22.1"
+PLUGIN_VERSION = "1.23.2"
 CONFIG_SCHEMA_VERSION = "1.11.0"
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -1172,9 +1172,9 @@ class LinkageSettings(PluginConfigBase):
         description="启用麦麦绘图联动：聊天中麦麦想分享日常生活画面时，可调用麦麦绘图插件（maimai-drawpic-plugin）的工具生成并发送。",
         json_schema_extra=_ui(
             "启用麦麦绘图联动",
-            "默认关闭；需已安装麦麦绘图插件并配置好至少一个绘图平台的 Key，未安装时本开关不生效。",
+            "默认关闭；需已安装麦麦绘图插件。检测仅确认插件已加载（不校验其版本与绘图平台 Key），注入时另需 draw 工具对当前对话可见，否则不生效。",
             0, label_en="Drawpic Linkage",
-            hint_en="Requires the maimai-drawpic-plugin with at least one platform key configured; ineffective otherwise.",
+            hint_en="Off by default; requires the maimai-drawpic-plugin installed. Detection confirms the plugin is loaded only (no version or platform-key check); injection also requires the draw tool to be visible in the current chat.",
         ),
     )
 

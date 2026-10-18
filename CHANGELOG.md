@@ -1,5 +1,58 @@
 # 更新日志
 
+## [1.23.2] - 2026-10-19
+
+### 新增
+
+- **drawpic Tool 名常量与契约断言**：`DRAWPIC_DRAW_TOOL`/`DRAWPIC_DRAW_STATUS_TOOL`（plugin.py:59-60）与 drawpic 2.1.1 注册名逐字对应（`draw`：interfaces/tools/drawing.py:15-22；`draw_status`：interfaces/tools/status.py:12-16），tests/test_fixes.py 新增断言钉住引导文案只引用这两个工具——drawpic 改名时测试先红，不静默漂移。
+
+### 修复
+
+- **注入引导新增「draw 工具本轮可见」守卫**（plugin.py:613-616）：_drawpic_loaded 是 10 分钟一复检的内存态（plugin.py:481、config.py:493-494），插件中途卸载后的陈旧窗口里旧 True 会让引导指向不在本轮 tool_definitions 里的工具；现从 Planner 工具定义提取名字（兼容 OpenAI function 结构与平铺 name，宿主 chat_loop_service.py:1242 同款形态），零 RPC。被拦轮次不写频控记录，不白耗每日 3 次额度。
+- **更正「drawpic 无 @API」过期注释**（plugin.py:51-57）：drawpic 2.1.1 已暴露 16 个 public @API（interfaces/api/ 下 integration 7 个 v1、tasks_v2 6 个、preferences 3 个），调用方只需 api.call（本 manifest 早已声明）；本联动刻意只走 Tool 通道，不改造为重型客户端。
+- **docs/plugin-guide.md drawpic 引用系统性校正**：§11.5 整节重写（行号按 v1.23.1 源码逐条校正并换算改动位移；可见性实为 /麦麦配置 三态文案 plugin.py:1864 而非 /麦麦状态；补记 context.enabled 耦合、第九重守卫与 16 个 public @API 的契约核对）；另校正 :229、:244、:177/:243/:270/:808/:822/:838/:3373、:270/:810、:840（含「绘图联动频控随热更新清理」的不实表述，防抖 burst 同理）、:261 与 :1815（绘图判定 3.2s 引用）、:1973 与 :3558（on_receive 运行态落账）、:2012、:311、:3681、:3683 与配置表行（:730）；AGENTS.md §7/§3 补联动入口与两条隐性耦合。
+
+### 说明
+
+- 检测语义边界不变（已知限制）：component.list_loaded_plugins 只证明插件已加载，不证明版本或绘图平台 Key 已配；未加版本门槛（drawpic 自有 changelog 未记录 draw/draw_status 的引入版本，唯一可核实源码是 2.1.1，设门槛会无据阻断可用旧版），也未加 Key 就绪探测（空模型列表有多因，失败通知由 drawpic 直发、引导文案已要求不重试）。
+- [linkage] hint 改写为诚实描述检测语义（config.py:1175）；WebUI linkage 键集与两张卡片不变（webui.json:2773-2803，test_contract.py:272/508 契约断言守住）。
+- 顺带核对（按方案兜底规则只记不改）：指南另有多处非 drawpic 引用的既存漂移——:229 的 `__init__` 区间、:244 的装配后同步/人格刷新区间、:311 同句的 299/356/424（424 实测并非其所引的睡前误拦注释）、§4.1 维护顺序清单、§11.1 维护时序图第 1/3-9 步、§5.6 注入 mechanics、热更新流程图与生命周期表的多处 `plugin.py` 行号，建议后续做一次全指南行号专项校对。
+- 测试与联调状态：全量测试 542 项通过（1 项环境性跳过，AGENTS.md §1 命令实跑）；部署环境 OneKey 0163381a22cb 无 drawpic 副本，Tool 名与载荷结构以工作区 drawpic 2.1.1 源码与部署宿主 MaiBot v1.3.8 源码为准，mock 验证、未真机联调。
+
+## [1.23.1] - 2026-10-18
+
+### 变更
+
+- **mai_life_browse_web 群聊放开**：聊天作用域由仅私聊改为群聊/私聊均可用（get_components() 注册后把 chat_scope 改写为 all，plugin.py:229）。群聊中被明确要求时也会打开网页、截图并直发当前群会话；工具描述补充「群聊中截图对全群可见，更要谨慎」的约束。
+- **修复群聊截图路由**：tool_browse_web 调用发图层时透传 group_id（plugin.py:1680），否则群聊场景会优先解析到触发用户的私聊会话、把截图误发进 DM。
+
+### 说明
+
+- 截图滥用面随群聊放开而扩大：仍依赖工具描述内的触发约束（仅用户明确要求、不重复截同一网页、单轮最多一张）；若后续出现刷屏再评估加频控。
+- 全量测试 540 项（新增 1 条群聊路由回归用例）。
+
+## [1.23.0] - 2026-10-18
+
+### 变更
+
+- **移除 Pillow 本地生图链**：删除 messaging/menu_renderer.py 与 messaging/command_result_renderer.py，
+  requirements.txt 移除 Pillow 依赖。指令菜单与全部指令结果改为纯文本发送（_send_command →
+  CommandReplyService.send_text_with_fallback，实时 stream 解析与原始 stream 重试不变）。
+  send.image 能力保留：mai_life_browse_web 网页截图仍走 ctx.send.image。
+- **精简指令集**：22 条命令精简为 11 条。保留 /麦麦、/麦麦帮助（菜单入口与手滑兜底）、
+  /麦麦状态、/麦麦配置、/麦麦休息测试（诊断自检），以及 /麦麦添加日期、/麦麦删除日期、/麦麦确认日期、
+  /麦麦立即创作、/麦麦转述、/麦麦重生日程（写操作，暂无 WebUI 等价入口，全部保留）；
+  移除 /麦麦日程、/麦麦关系、/麦麦撤回、/麦麦日记、/麦麦日期、/麦麦新闻、/麦麦探索、/麦麦书柜、/麦麦阅读、
+  /麦麦统计、/麦麦管理。被移除的 11 条均为查询类命令，其查询面已由 WebUI 七个页面覆盖（书柜全文见页面内弹窗）。
+  输入已移除的指令（含 /mai_* 英文别名）会落进「未识别指令」兜底并显示菜单，不会报错。
+
+### 说明
+
+- 长结果不再分页（原 42 行/页）与 20000 字截断，整段文本经 ctx.send.text 一次性发出；
+  宿主是否截断超长文本未在仓库内验证。
+- 「未找到中文字体」启动告警与字体安装指引随渲染器移除而失去意义。
+- 书柜「修订查看」随 /麦麦阅读 移除而消失（WebUI 仅展示正文全文、不返回修订），属本次唯一的真实能力缩减。
+
 ## [1.22.1] - 2026-10-18
 
 ### 变更
