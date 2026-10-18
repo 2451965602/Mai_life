@@ -39,6 +39,32 @@ class RestGate:
             return "wake","明确叫醒、紧急或安全需要"
         return "judge","普通消息"
 
+    def _degenerate_window(self)->str:
+        """夜窗/群窗起止相同 = 窗口永假：闸门只剩日程类型一条路，用户完全看不出来。
+
+        实测：night_start=night_end="00:00" 且当前日程段不是 sleep/nap 时，
+        普通消息全部放行（outside_gate_window），表现为"夜间闸门失效"。
+        """
+        cfg=self.config.rest_gate
+        if str(getattr(cfg,"night_start",""))==str(getattr(cfg,"night_end","")):
+            return f"night_start=night_end={cfg.night_start}"
+        if getattr(cfg,"group_enabled",False) and str(
+                getattr(cfg,"group_night_start",""))==str(getattr(cfg,"group_night_end","")):
+            return f"group_night_start=group_night_end={cfg.group_night_start}"
+        return ""
+
+    def _warn_degenerate_window(self,now_ts:float)->None:
+        message=self._degenerate_window()
+        if not message:return
+        if now_ts-float(getattr(self,"_window_warned_at",0) or 0)<3600:return
+        self._window_warned_at=now_ts
+        logger=getattr(self,"logger",None)
+        if logger:
+            logger.warning(
+                f"[MaiLife] 休息闸门时间窗起止相同（{message}）：该窗口永不生效，"
+                f"闸门只对 gate_segment_types 列出的日程类型起作用；"
+                f"如需整夜生效请把结束时间设为起床时间（如 08:00）")
+
     def in_group_quiet_window(self,now:Any)->bool:
         """当前是否处于群静音窗（群夜间或群午休窗，配置独立于私聊）。"""
         cfg=self.config.rest_gate
@@ -63,16 +89,21 @@ class RestGate:
                 return bool(getattr(item,"enabled",False) and getattr(item,"rest_gate_enabled",False))
         return False
 
-    def decide_group(self,text:str,now:Any,group_id:str)->tuple[bool,str]:
-        """群聊轻量版闸门：总闸/分群开关 → 时间窗 → 强制唤醒词放行 / 勿扰词阻断 / 其余静默。
+    def decide_group(self,text:str,now:Any,group_id:str,segment:dict[str,Any]|None=None)->tuple[bool,str]:
+        """群聊轻量版闸门：总闸/分群开关 → 时间窗或日程类型 → 强制唤醒词放行 / 勿扰词阻断 / 其余静默。
 
         不放行概率、不建待醒候选、不写积压——每条群消息独立判定；
         被阻断的消息不进入主程序，因此不产生 Planner/Replyer/VLM 等请求。
+        生效条件与私聊同构：群夜窗/群午休窗内一定生效；group_gate_segment_types
+        列出的日程类型在任意时间也生效（默认夜间睡眠+午休）。
         """
         cfg=self.config.rest_gate
         if not getattr(cfg,"group_enabled",False):return True,"group_gate_disabled"
+        self._warn_degenerate_window(now.timestamp())
         if not self.group_gate_enabled_for(group_id):return True,"group_not_enabled"
-        if not self.in_group_quiet_window(now):return True,"outside_group_window"
+        segment_kind=str((segment or {}).get("kind") or "")
+        kind_match=segment_kind in set(getattr(cfg,"group_gate_segment_types",None) or [])
+        if not (self.in_group_quiet_window(now) or kind_match):return True,"outside_group_window"
         compact=re.sub(r"\s+","",str(text or "").lower())
         for term in (getattr(cfg,"group_force_wake_terms",None) or []):
             word=str(term or "").strip().lower()
@@ -93,7 +124,20 @@ class RestGate:
     async def decide(self,user_id:str,text:str,now:Any,segment:dict[str,Any]|None,
                      *,session_id:str="",message_id:str="",media:list[str]|None=None)->tuple[bool,str]:
         """按总开关、时间窗、规则边界及选定模式建立"待醒"候选，不直接提交醒来。"""
+        allowed,reason=await self._decide(user_id,text,now,segment,session_id=session_id,
+                                          message_id=message_id,media=media)
+        # 闸门生效却放行时必须留痕：否则"夜里还在回消息"无法判断是 defer/宽限/
+        # 唤醒词还是概率放行，只能看到机器人回话而没有任何线索。
+        if allowed and reason not in {"disabled","command","outside_gate_window"}:
+            logger=getattr(self,"logger",None)
+            if logger:
+                logger.info(f"[MaiLife] 休息闸门放行 user={user_id} reason={reason}")
+        return allowed,reason
+
+    async def _decide(self,user_id:str,text:str,now:Any,segment:dict[str,Any]|None,
+                      *,session_id:str="",message_id:str="",media:list[str]|None=None)->tuple[bool,str]:
         cfg=self.config.rest_gate
+        self._warn_degenerate_window(now.timestamp())
         if not cfg.enabled:return True,"disabled"
         if str(text or "").lstrip().startswith("/"):return True,"command"
         # 时间窗与日程类型共同决定闸门是否生效（OR 语义）：

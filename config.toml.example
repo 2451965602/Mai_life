@@ -117,6 +117,14 @@ body_cycle_period_days = 5
 enabled = true
 dream_fragments_enabled = true
 dream_fragment_count = 3
+
+# 每个合格夜晚醒来后实际生成梦境的概率，0～1。
+# 0.35 约每周 2～3 次；0 永不做梦，1 每晚必做。午睡和短睡路径不掷骰。
+dream_probability = 0.35
+
+# 近 7 天已落库梦境数上限，范围 0～7；0 表示不限制，只靠上方概率单旋钮。
+# 达到上限的当晚直接跳过做梦，是对冲连彩的可选保险。
+dream_weekly_max = 0
 diary_enabled = true
 diary_hour = 2
 diary_max_chars = 1200
@@ -155,6 +163,27 @@ night_start = "22:30"
 night_end = "08:00"
 nap_start = "12:00"
 nap_end = "14:30"
+
+# ===== 群聊休息闸门（独立于私聊，默认关闭）=====
+# 开启后，在下方群时间窗内，群里只有含强制唤醒词的消息会被回复，其余静默
+# （不回复、不积压、不进主程序，因此不产生 Planner/Replyer/VLM 请求）。
+group_enabled = false
+
+# 作用范围：all=所有群；selected=只对社交白名单中开了「夜间静音」的群生效。
+group_mode = "all"
+
+# 群夜间/午休窗（独立于私聊设置，支持跨午夜）。
+group_night_start = "22:30"
+group_night_end = "08:00"
+group_nap_start = "12:00"
+group_nap_end = "14:30"
+
+# 群闸门生效的日程类型：群时间窗内一定生效；列出的类型在任意时间也生效（OR 语义）。
+# 与私聊 gate_segment_types 同构，默认只保留夜间睡眠和午休。
+group_gate_segment_types = ["sleep", "nap"]
+
+# 群强制唤醒词：群消息含任意一词立即放行；独立于私聊词表。
+group_force_wake_terms = ["救命", "急事", "报警", "醒醒", "快醒", "叫醒", "出事了", "很难受", "撑不住", "危险", "轻生", "自杀"]
 
 
 [context]
@@ -373,6 +402,32 @@ external_reading_enabled = false
 external_reading_api_name = ""
 external_reading_max_items = 3
 reading_annotation_enabled = true
+
+# 书柜续写：存在有资格的旧书时，按概率续写下一章而不是开新书。
+# 关闭后与仅创作全新作品的行为完全一致。
+continuation_enabled = true
+
+# 有资格旧书时选择续写的概率，0～1。1.0 永远先续旧书，0.0 永久只开新书。
+continuation_probability = 0.65
+
+# 同一本书两章之间的最小间隔天数，按上一章归档时间判断；0 允许同一天续写。
+continuation_min_gap_days = 1  # 范围 0～30，且必须小于停滞天数
+
+# 单本书最多章节数，达到后视为完结、不再续写。
+continuation_max_chapters = 8  # 范围 2～100
+
+# 多少天没有新章节的书视为完结，不再续写。
+continuation_stale_days = 30  # 范围 1～365，且必须大于最小间隔
+
+# 可续写的体裁，与上方 work_types 取交集；交集为空等于禁用续写。
+# 默认排除诗与随笔：以单篇完整性为美，硬续稀释质量。
+continuation_work_types = ["novel_fragment", "screenplay", "storyboard", "worldbuilding", "character"]
+
+# 续写时向模型回看的最近章节数，范围 1～10。
+continuation_context_chapters = 3
+
+# 每章回看携带的正文字尾字符数，范围 0～2000；0 表示只回看章节提纲。
+continuation_chapter_tail_chars = 400
 
 
 [linkage]

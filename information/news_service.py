@@ -44,15 +44,22 @@ class NewsService:
             query,operation="news",freshness="day",event_at=now.timestamp(),
         )
         if not response.results:return 0
-        results=response.results[:min(5,int(self.config.search_api.max_results))]
+        # 入库前相关性过滤：弱相关条目（标题/摘要与查询词无实质词元重叠，由 Playwright 侧标记 weak）不入库；
+        # API 路线不填充 weak（保持 False），因此只影响浏览器搜索结果。
+        results=[item for item in response.results if not item.weak][:min(5,int(self.config.search_api.max_results))]
+        if not results:
+            self.logger.info("[MaiLife] 新闻搜索结果整体弱相关，未写入新闻库")
+            return 0
         contents=await self._read_articles(results)
         changed=0; now_ts=now.timestamp(); retention=int(cfg.retention_days)*86400
         for index,result in enumerate(results):
             uncited=bool(result.provider_generated and not result.url)
             summary=result.snippet
             if uncited:summary="Provider 生成、无外部引用："+summary
+            # 去重键只由 url 或 title+snippet 决定，不再拼入 provider_id：
+            # 配置变化导致 provider_id 改变时，同一条新闻不会被重复入库。
             stable=result.url or hashlib.sha256(f"{result.title}:{result.snippet}".encode()).hexdigest()
-            item_id=hashlib.sha256(f"{response.provider_id}:{stable}".encode()).hexdigest()
+            item_id=hashlib.sha256(stable.encode()).hexdigest()
             content=contents.get(index,"")[:int(cfg.max_article_chars)]
             digest=hashlib.sha256(json.dumps([result.title,summary,content],ensure_ascii=False).encode()).hexdigest()
             source_id=f"api:{response.provider_type}"+(":uncited" if uncited else "")

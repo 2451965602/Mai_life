@@ -2,12 +2,23 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 from .http_client import HttpClient,HttpRequestError
 from .search_models import SearchResponse,SearchResult
 
 _URL_RE=re.compile(r"https?://[^\s<>\]\[()\"']+",re.I)
+
+# 疑问/语气冗余词：弱相关判定与 Bing 整形共用。长词优先，避免"怎么"被"么"抢先。
+# 只收多字词：单字"的/了"等不做子串剔除（会切碎"目的/了解"等正常词），仅在独立成词时忽略。
+_WEAK_FILLERS=("怎么样","什么的","一下子","的话","怎么","如何","什么","请问","一下")
+_WEAK_FILLER_CHARS=frozenset("的吗呢吧啊呀嘛么地得和与及或了")
+# 词元片段：CJK 连续段与 ASCII 字母数字连续段；标点/空白天然分词。
+_SEGMENT_RE=re.compile(r"[^\W_]+",re.U)
+_RUN_RE=re.compile(r"[\u4e00-\u9fff]+|[0-9a-z]+")
+# 弱判定阈值：命中的内容字符占比不足三分之一视为"重叠极弱"。
+_WEAK_COVERAGE=3
 
 
 def _nested(value:Any,*paths:str)->Any:
@@ -50,6 +61,61 @@ def clean_result(title:Any,url:Any,snippet:Any,generated:bool=False)->SearchResu
         except HttpRequestError:url_text=""
     if not title_text and not snippet_text:return None
     return SearchResult(title_text or "未命名结果",url_text,snippet_text,generated)
+
+
+def _filler_mask(segment:str)->list[bool]:
+    """标出片段中冗余词占据的字符位置（长词优先，避免短词切碎长词）。"""
+    mask=[False]*len(segment); index=0
+    while index<len(segment):
+        for filler in _WEAK_FILLERS:
+            if segment.startswith(filler,index):
+                for position in range(index,index+len(filler)):mask[position]=True
+                index+=len(filler); break
+        else:index+=1
+    return mask
+
+
+def is_weak_result(query:str,title:str,snippet:str)->bool:
+    """纯函数：结果标题/摘要与查询词没有实质词元重叠时判弱，供 Playwright 解析阶段填充 weak。
+
+    语义（按 2026-10-17 cn.bing 实证标定）：
+    - 查询按标点/空白切分，CJK 段生成 2-4 字滑窗、ASCII 段按整词，与标题+摘要比对；
+    - 完全不重叠，或命中内容字符不足查询内容字符的三分之一（"重叠极弱"）→ True；
+    - 1 字 CJK 查询恒判弱：滑窗最小 2 字，单字无法命中，字面单字不足以判定相关
+      （实证：'猫'只命中百科词条）；
+    - 查询没有可匹配的内容字符（单字 ASCII、纯语气词）时无法证明相关 → True；
+    - 2 字查询完整字面命中即过阈值，不因查询短而一律判弱（实证：'天气'命中北京天气预报、
+      '新闻'命中腾讯网新闻中心、'电影'命中豆瓣电影、'go'命中 The Go Programming Language）。
+    不得误判的实证：'明天天气怎么样'命中 5 个天气站点（命中"天气"即过阈值）、
+    '开源软件'命中 OSCHINA/GitHub/Gitee（完整四字命中）都必须 weak=False。
+    """
+    text=unicodedata.normalize("NFKC",f"{title or ''} {snippet or ''}").casefold()
+    query_text=unicodedata.normalize("NFKC",str(query or "")).casefold()
+    if not query_text.strip():return False  # 查询为空时无法判定，不标记弱
+    content=0; matched_content=0
+    for segment in _SEGMENT_RE.findall(query_text):
+        if all(character in _WEAK_FILLER_CHARS for character in segment):continue
+        mask=_filler_mask(segment); hit:set[int]=set()
+        for run in _RUN_RE.finditer(segment):
+            token=run.group(); start=run.start()
+            if token.isascii():
+                # ASCII 词元按整词边界匹配，避免 "ai" 命中 "said" 之类的子串噪声。
+                if len(token)<2:continue
+                content+=len(token)
+                if re.search(rf"(?<![0-9a-z]){re.escape(token)}(?![0-9a-z])",text):
+                    hit.update(range(start,start+len(token)))
+            else:
+                content+=sum(1 for position in range(start,start+len(token)) if not mask[position])
+                for offset in range(max(0,len(token)-1)):
+                    for size in (4,3,2):
+                        if offset+size>len(token):continue
+                        if token[offset:offset+size] in text:
+                            hit.update(range(start+offset,start+offset+size))
+        matched_content+=sum(1 for position in hit if not mask[position])
+    # 没有可匹配的内容字符（单字 ASCII 被跳过、整段都是语气词）时无法证明相关，判弱；
+    # 短查询不再一律判弱——2 字查询完整字面命中（天气/新闻/电影）是强相关信号。
+    if content==0:return True
+    return matched_content*_WEAK_COVERAGE<content
 
 
 def parse_standard(provider_type:str,payload:Any,max_results:int)->SearchResponse:
@@ -176,6 +242,7 @@ def redact_key_echo(response:SearchResponse,key:str)->SearchResponse:
     def clean(value:str)->str:return str(value or "").replace(secret,"[REDACTED]")
     results=[SearchResult(
         clean(item.title),"" if secret in item.url else item.url,clean(item.snippet),item.provider_generated,
+        item.weak,
     ) for item in response.results]
     return SearchResponse(
         results,response.provider_id,response.provider_type,clean(response.generated_text),

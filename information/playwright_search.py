@@ -12,9 +12,19 @@ import re
 
 from .http_client import HttpClient,HttpRequestError
 from .search_models import SearchBackendError,SearchResponse,SearchResult
+from .search_parsing import is_weak_result
 
 
 _BING_REDIRECT=re.compile(r"(?:[?&])u=a1([^&]+)",re.I)
+# Bing 查询整形剔除的疑问/语气冗余词（长词优先，避免短词抢先匹配段尾）。
+# 只按词边界剔除（整段或段尾），绝不做子串剔除：'为什么'里的'什么'按子串删掉会变成'为'，
+# '什么意思'会变成'意思'，正常疑问词被打碎，失配反而加重。
+_BING_QUERY_FILLERS=("怎么样","什么的","一下子","的话","怎么","如何","什么","请问","一下")
+# 独立成词（空白/标点分隔）时才丢弃的单字语气词。
+_BING_FILLER_CHARS=frozenset("的吗呢吧啊呀嘛么地得和与及或了")
+# 整形后查询少于 3 个字符时保留原查询：1-2 字查询发给搜索引擎没有意义，
+# 也避免把"怎么 办"这类带空白的疑问词打成单字"办"。
+_BING_MIN_SHAPED=3
 
 
 def _clean_text(value:str,limit:int)->str:
@@ -69,11 +79,18 @@ class _SearchHTMLParser(HTMLParser):
         if self._current is None or not self._field:return
         self._current[self._field]=(self._current.get(self._field) or "")+data
 
-    def parse(self,html:str,limit:int)->list[SearchResult]:
-        """解析结果页 HTML，并按配置数量返回自然搜索结果。"""
+    def parse(self,html:str,limit:int,query:str="")->list[SearchResult]:
+        """解析结果页 HTML，并按配置数量返回自然搜索结果。
+
+        query 非空时按词元重叠逐条填充 weak 弱相关标记（与另一组的 SearchResult.weak 契约）。
+        """
         self.feed(html); self.close()
-        return [SearchResult(title=item["title"],url=item["url"],snippet=item["snippet"])
-                for item in self.results[:max(0,int(limit))]]
+        cleaned=" ".join(str(query or "").split())
+        results=[]
+        for item in self.results[:max(0,int(limit))]:
+            weak=bool(cleaned) and is_weak_result(cleaned,item["title"],item["snippet"])
+            results.append(SearchResult(title=item["title"],url=item["url"],snippet=item["snippet"],weak=weak))
+        return results
 
     def _finish_result(self)->None:
         result=self._current or {}
@@ -150,10 +167,43 @@ class PlaywrightSearchClient:
     _DUCK_FRESHNESS={"day":"d","week":"w","month":"m","year":"y"}
 
     @staticmethod
+    def _normalized_engine(engine:str)->str:
+        """搜索引擎名统一归一化：URL 生成与解析器选择必须走同一条路径。
+
+        否则传入 "Bing" 时 search_url 按 Bing 建 URL、解析器却精确匹配 engine=="bing" 失败
+        而回落到 DuckDuckGo 解析器，把 Bing 页面解析成空结果。
+        """
+        return str(engine or "").strip().casefold()
+
+    @staticmethod
+    def _shape_bing_query(query:str)->str:
+        """Bing 查询整形：剔除疑问/语气冗余词，降低多词中文查询只命中部分词元的失配。
+
+        只按词边界剔除，绝不做子串剔除：'为什么/怎么办/什么意思' 里的 '什么/怎么'
+        一旦按子串删掉就变成 '为/办/意思'，与降低失配的意图相反。
+        - 空白/标点分隔的整段全是冗余词（多字词或单字语气词）时丢弃；
+        - CJK 连续段只剔除段尾的冗余词，且剔除后该段仍不少于 _BING_MIN_SHAPED 个字符
+          （'明天天气怎么样'→'明天天气'；'什么意思'→'意思' 这类不足 3 字的剔除直接放弃）。
+        全部为冗余词、或整形后不足 _BING_MIN_SHAPED 个字符时保留原查询，避免把 q 整空或打得太碎。
+        """
+        parts=[]
+        for part in query.split():
+            if part in _BING_QUERY_FILLERS:continue
+            if all(character in _BING_FILLER_CHARS for character in part):continue
+            for filler in _BING_QUERY_FILLERS:
+                if part.endswith(filler) and len(part)-len(filler)>=_BING_MIN_SHAPED:
+                    part=part[:len(part)-len(filler)]; break
+            parts.append(part)
+        shaped=" ".join(parts)
+        return shaped if len(shaped)>=_BING_MIN_SHAPED else query
+
+    @staticmethod
     def search_url(engine:str,query:str,freshness:str)->str:
         """生成固定搜索引擎地址；不接受任意自定义 URL。"""
-        kind=str(engine or "").strip().casefold(); value=str(freshness or "any").strip().casefold()
-        params={"q":str(query or "").strip()}
+        kind=PlaywrightSearchClient._normalized_engine(engine)
+        value=str(freshness or "any").strip().casefold()
+        raw=str(query or "").strip()
+        params={"q":PlaywrightSearchClient._shape_bing_query(raw) if kind=="bing" else raw}
         if kind=="bing":
             if value in PlaywrightSearchClient._BING_FRESHNESS:params["filters"]=PlaywrightSearchClient._BING_FRESHNESS[value]
             return "https://www.bing.com/search?"+urlencode(params)
@@ -199,13 +249,18 @@ class PlaywrightSearchClient:
         """执行一次固定引擎搜索，并返回自然结果。"""
         cleaned=" ".join(str(query or "").split())
         if not cleaned:raise SearchBackendError("搜索词为空",error_class="invalid_response")
+        kind=self._normalized_engine(engine)
         url=self.search_url(engine,cleaned,freshness)
-        parser=BingSearchParser() if engine=="bing" else DuckDuckGoSearchParser()
+        parser=BingSearchParser() if kind=="bing" else DuckDuckGoSearchParser()
+        timeout_ms=max(1000,int(timeout_seconds*1000))
         async with self._search_lock:
             context=await self._ensure_browser(); page=await context.new_page()
             try:
-                await page.goto(url,timeout=max(1000,int(timeout_seconds*1000)),wait_until="domcontentloaded")
-                html=await page.content()
+                # 路由注册在 page 上，page.close() 后自动失效；Chromium 跟随重定向发起的每一跳都过公网校验（与 screenshot 对齐，阻断重定向 SSRF）。
+                await page.route("**/*",self._guard_browser_request)
+                await page.goto(url,timeout=timeout_ms,wait_until="domcontentloaded")
+                # page.content() 与 goto 同源超时：页面卡住时按网络超时分类，绝不无限期挂起。
+                html=await asyncio.wait_for(page.content(),timeout=timeout_ms/1000)
             except Exception as exc:
                 message=str(exc).casefold()
                 if "timeout" in message or isinstance(exc,TimeoutError):
@@ -214,7 +269,7 @@ class PlaywrightSearchClient:
                     raise SearchBackendError("浏览器搜索网络失败",error_class="network") from exc
                 raise SearchBackendError("浏览器搜索失败",error_class="browser_error") from exc
             finally:await page.close()
-            results=parser.parse(html,max_results)
+            results=parser.parse(html,max_results,cleaned)
             if not results:
                 lowered=html.casefold()
                 if any(marker in lowered for marker in ('class="b_captcha"',"challenge-form","are you a human","unusual traffic")):
