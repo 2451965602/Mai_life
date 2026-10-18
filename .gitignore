@@ -1,39 +1,25 @@
-# Runtime data
 /data/
 /config_back/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-
-# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
 htmlcov/
-
-# Editors and OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
-# Logs and temporary files
 *.log
 *.tmp
 *.bak
-
-# Playwright CLI runtime snapshots
 /.playwright-cli/
-
-# Local handover notes
 HANDOVER.md
-
-# 运行时配置：由 Runner 按 config_model 生成、WebUI 维护；仓库只提交模板 config.toml.example
 /config.toml
-
-# WebUI 设计过程稿（设计师工作副本，勿入库）
 webui_head_tmp.json
 webui_v1_backup.json
 webui_v2.json
+docs/_draft_*.md
