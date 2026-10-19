@@ -303,13 +303,15 @@ class PluginFixTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.store.close(); self.tmp.cleanup()
 
-    async def test_browse_tool_is_available_in_group_and_private_scopes(self):
+    async def test_tool_chat_scopes_match_design(self):
         plugin = _plugin(self.store, self.config)
         components = plugin.get_components()
         scopes = {str(item.get("name")): str(item.get("chat_scope") or "all")
                   for item in components}
-        self.assertEqual(scopes.get("mai_life_browse_web"), "all")
         self.assertEqual(scopes.get("mai_life_web_search"), "all")
+        self.assertEqual(scopes.get("mai_life_browse_web"), "all")
+        # 日程工具仅群聊：群轮次不注入私聊背景，日程靠工具补齐；私聊本就有日程注入。
+        self.assertEqual(scopes.get("mai_life_get_schedule"), "group")
 
     async def test_group_recall_context_hides_message_ids(self):
         recall = RecallService(DummyCtx(), self.store, self.config, DummyLogger())
@@ -342,6 +344,76 @@ class PluginFixTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ==========v1.14.3==========
+
+
+class StubScheduleContext:
+    def __init__(self,context:dict[str,Any])->None:self.context_data=context; self.calls:list[Any]=[]
+    async def context(self,now:Any)->dict[str,Any]:
+        self.calls.append(now); return self.context_data
+
+
+class StubEnvNow:
+    def __init__(self,now:Any)->None:self._now=now
+    def now(self)->Any:return self._now
+
+
+def _schedule_tool_context()->dict[str,Any]:
+    node=lambda i,s,e,summary,location:{"id":i,"day":"2026-10-19","start_minute":s,"end_minute":e,
+                                        "kind":"sleep" if "睡" in summary else "meal","summary":summary,"location":location}
+    current=node("n3",1350,1440,"准备睡觉","卧室")
+    return {"nodes":[node("n1",0,480,"安稳睡觉","卧室"),node("n2",480,540,"起床洗漱并吃早餐","家里"),current],
+            "current":current,"next":None,
+            "scene":{"framework_id":"n3","scene":"卧室里安静下来，她闭上眼准备休息。","state_deltas":{}}}
+
+
+class V1234ScheduleToolTests(unittest.IsolatedAsyncioTestCase):
+    """v1.23.4：mai_life_get_schedule 群聊日程工具（chat_scope=group，载荷含时间线/当前段/场景）。"""
+
+    def _plugin(self,context:dict[str,Any],*,enabled:bool=True)->MaiLifePlugin:
+        plugin=MaiLifePlugin(); plugin.set_plugin_config(MaiLifeSettings().model_dump(mode="python"))
+        plugin.config.plugin.enabled=enabled
+        plugin._set_context(DummyCtx())
+        plugin._schedule=StubScheduleContext(context)
+        plugin._env=StubEnvNow(datetime(2026,10,19,22,34,tzinfo=timezone(timedelta(hours=8))))
+        return plugin
+
+    async def test_group_schedule_tool_returns_timeline_and_scene(self):
+        plugin=self._plugin(_schedule_tool_context())
+        result=await plugin.tool_get_schedule(user_id="1",stream_id="g1",group_id="100",platform="qq")
+        self.assertTrue(result["success"])
+        content=str(result["content"])
+        self.assertIn("麦麦今天（10-19）的日程，现在 22:34：",content)
+        self.assertIn("·00:00-08:00 安稳睡觉（卧室）",content)
+        self.assertIn("·08:00-09:00 起床洗漱并吃早餐（家里）",content)
+        self.assertIn("【当前】22:30-24:00 准备睡觉（卧室）",content)
+        self.assertIn("当前场景：卧室里安静下来，她闭上眼准备休息。",content)
+
+    async def test_schedule_tool_marks_only_current_segment(self):
+        plugin=self._plugin(_schedule_tool_context())
+        result=await plugin.tool_get_schedule(group_id="100")
+        self.assertEqual(str(result["content"]).count("【当前】"),1)
+
+    async def test_schedule_tool_reports_when_plugin_disabled(self):
+        plugin=self._plugin(_schedule_tool_context(),enabled=False)
+        result=await plugin.tool_get_schedule(group_id="100")
+        self.assertFalse(result["success"]); self.assertIn("已关闭",str(result["content"]))
+
+    async def test_schedule_tool_handles_empty_framework(self):
+        plugin=self._plugin({"nodes":[],"current":None,"next":None,"scene":{}})
+        result=await plugin.tool_get_schedule(group_id="100")
+        self.assertFalse(result["success"]); self.assertIn("还没有生成日程",str(result["content"]))
+
+    async def test_schedule_tool_requires_service(self):
+        plugin=self._plugin(_schedule_tool_context()); plugin._schedule=None
+        result=await plugin.tool_get_schedule(group_id="100")
+        self.assertFalse(result["success"]); self.assertIn("尚未初始化",str(result["content"]))
+
+    async def test_schedule_tool_survives_context_failure(self):
+        class Failing:
+            async def context(self,now:Any)->dict[str,Any]:raise RuntimeError("db down")
+        plugin=self._plugin(_schedule_tool_context()); plugin._schedule=Failing()
+        result=await plugin.tool_get_schedule(group_id="100")
+        self.assertFalse(result["success"]); self.assertIn("失败",str(result["content"]))
 
 
 class SettleWarningTests(unittest.IsolatedAsyncioTestCase):

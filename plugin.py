@@ -1,4 +1,4 @@
-"""Mai_life v1.23.3 插件入口。"""
+"""Mai_life v1.23.4 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -235,15 +235,17 @@ class MaiLifePlugin(MaiBotPlugin):
                     self._bedtime))
 
     def get_components(self)->list[dict[str,Any]]:
-        """组件聊天作用域：截图会直接向当前会话发图，mai_life_browse_web 群聊/私聊均可用（v1.23.1 起放开）。
+        """组件聊天作用域：mai_life_browse_web 群聊/私聊均可用（v1.23.1 起放开）；
+        mai_life_get_schedule 仅群聊（群轮次不注入私聊背景，日程靠工具补齐）。
 
         chat_scope 必须写在组件声明顶层（Host 注册时顶层优先于 metadata），
         与 @Tool 装饰器参数无关，唯一可靠方式是重写本方法。
         """
         components=super().get_components()
         for component in components:
-            if str(component.get("name") or "")=="mai_life_browse_web":
-                component["chat_scope"]="all"
+            name=str(component.get("name") or "")
+            if name=="mai_life_browse_web":component["chat_scope"]="all"
+            if name=="mai_life_get_schedule":component["chat_scope"]="group"
         return components
 
     def _resolve_data_dir(self,plugin_root:str)->str:
@@ -1720,6 +1722,49 @@ class MaiLifePlugin(MaiBotPlugin):
         if not sent:
             return {"success":False,"content":"截图成功但发送失败，请稍后重试。"}
         return {"success":True,"content":"已打开网页并截图发送给用户。"}
+
+    def _schedule_tool_text(self,now:Any,context:dict[str,Any])->str:
+        """群聊日程工具载荷：今日时间线（分钟→HH:MM）+ 当前段标记 + 当前场景，紧凑中文。"""
+        nodes=context.get("nodes") or []
+        if not nodes:return ""
+        current=context.get("current") or {}
+        lines=[f"麦麦今天（{now.strftime('%m-%d')}）的日程，现在 {now.strftime('%H:%M')}："]
+        for node in nodes:
+            start=int(node.get("start_minute") or 0); end=int(node.get("end_minute") or 0)
+            summary=str(node.get("summary") or "未命名安排")
+            location=str(node.get("location") or "")
+            marker="【当前】" if current and str(node.get("id") or "")==str(current.get("id") or "") else "·"
+            where=f"（{location}）" if location else ""
+            lines.append(f"{marker}{start//60:02d}:{start%60:02d}-{end//60:02d}:{end%60:02d} {summary}{where}")
+        scene=str((context.get("scene") or {}).get("scene") or "").strip()
+        if scene:lines.append(f"当前场景：{scene}")
+        return "\n".join(lines)
+
+    @Tool(
+        "mai_life_get_schedule",
+        brief_description="获取麦麦自己今天的日程安排和当前正在做的事",
+        description=("当用户问起麦麦自己的日程、安排、现在在做什么、接下来做什么时使用。"
+                     "返回麦麦今天各时间段的活动、地点以及当前场景；只依据返回内容回答，不要编造。"
+                     "回答时自然提及当前或接下来的一件事即可，不要背诵整张时间表。"),
+        detailed_description=("日程是麦麦自己的生活安排，可以在群聊里自然分享；对方没有问就不要主动报日程，"
+                              "也不要把麦麦的日程说成是对方的安排。"),
+    )
+    async def tool_get_schedule(self,**kwargs:Any)->dict[str,Any]:
+        """群聊专用：把麦麦今日日程与当前场景交给 LLM，弥补群轮次不注入私聊背景的缺口。"""
+        if not self.config.plugin.enabled:
+            return {"success":False,"content":"麦生活插件当前已关闭。"}
+        if not self._schedule or not self._env:
+            return {"success":False,"content":"日程服务尚未初始化。"}
+        now=self._env.now()
+        try:
+            context=await self._schedule.context(now)
+        except Exception as exc:
+            self.ctx.logger.warning(f"[MaiLife] 日程工具查询失败: {exc}")
+            return {"success":False,"content":"日程查询失败，请稍后重试。"}
+        content=self._schedule_tool_text(now,context)
+        if not content:
+            return {"success":False,"content":"麦麦今天还没有生成日程安排。"}
+        return {"success":True,"content":content}
 
     def _is_admin(self,user_id:str)->bool:
         admins=[str(item).strip() for item in self.config.plugin.admin_user_ids if str(item).strip()]
