@@ -224,41 +224,6 @@ Playwright 搜索会延迟启动 Chromium，并复用浏览器上下文。`playw
 
 自 v1.23.0 起指令集精简为以上 11 条：移除的 11 条均为查询类指令（日程、关系、撤回、日记、日期查询、新闻、探索、书柜、阅读、统计、管理），其查询面已由 MaiBot WebUI 的七个页面覆盖（书柜全文在页面内弹窗查看）；输入已移除的指令（含 `/mai_*` 英文别名）会落进未识别兜底并显示菜单，不会报错。
 
-## 实现原理
-
-规则层维护数值边界、日程校验、休息窗口、主动额度、Key 冷却和隐私边界；LLM 只负责叙事生成、摘要、查询规划和相关性判断。主动消息与跨群转述统一通过 `ctx.maisaka.proactive.trigger()` 交给 Planner 终审，插件不直接强制发送聊天内容。
-
-SQLite Schema v9 使用事务和异步锁。升级会删除旧技能表、技能结算字段和手动关系别名数据，并把旧 `daily_proactive_max = -1` 转换为主人 `2`、朋友 `1`；其他生活、关系、新闻、日记和作品数据继续保留。数据库损坏或版本不兼容时会先保留原文件，再建立新库。
-
-适配器兼容层只读取 MaiBot 标准消息结构，并归一化 SnowLuma/NapCat 的媒介和撤回通知。联网搜索由独立的 Playwright 浏览器服务负责；除 Chromium 外不调用 Shell、curl、ffmpeg 或其他外部二进制。
-
-公开 API 保持：
-
-- `maibot-community.mai-life.get_life_state`
-- `maibot-community.mai-life.get_current_scene`
-- `maibot-community.mai-life.get_schedule`
-- `maibot-community.mai-life.get_user_relationship`
-- `maibot-community.mai-life.get_environment_snapshot`
-- `maibot-community.mai-life.create_proactive_opportunity`
-
-私密话题、撤回摘要、搜索 Key 状态和 Token 明细不会通过无鉴权公共 API 暴露。
-
-## 常见问题
-
-**搜索一直降级**
-打开 MaiBot WebUI 的插件配置页（「系统与配置」）查看服务类型、浏览器引擎、Key 指纹、状态和最近错误类别。先确认已安装 Chromium，再检查网络、验证码、搜索引擎页面变化；若浏览器失败，检查后续 API 备援的 Key、额度、自定义地址和模型名。
-
-## 开发测试
-
-```powershell
-$env:PYTHONPATH='D:\MaiBot\plugin\maibot-plugin-sdk-2.8.2;D:\MaiBot\plugin'
-python -m unittest discover -s Mai_life\tests -v
-python -m compileall Mai_life
-python -m playwright install chromium
-```
-
-`playwright` 是联网搜索的运行依赖，Chromium 安装方法见上方「安装 Chromium」小节。`chinese-calendar`、`lunar-python` 均可离线降级；Pillow 生图链已于 v1.23.0 整体移除，插件不再依赖 Pillow，中文字体仅影响网页截图，缺失不会阻止插件加载。
-
 ## 特别感谢
 
 感谢https://github.com/menglimi/astrbot_plugin_private_companion给与我想法

@@ -2,7 +2,7 @@
 
 > 本文是 Mai_life 插件的唯一完全文档，由 9 份章节草稿合并去重而成，并补写了三个跨切面章节（消息全生命周期、关键流程时序、已知坑与设计取舍）。
 >
-> **引用约定**：所有 `文件:行号`（如 `plugin.py:936`）均相对 `Mai_life/` 目录，即 `plugin.py:936` 指 `Mai_life/plugin.py` 第 936 行；行号会随代码漂移，检索时以标识符为主、行号为辅。少数引用来自 MaiBot Plugin SDK 源码副本（以 `(SDK 2.8.0) maibot_sdk/...` 标注）或 `docs/` 下既有文档（相对 `Mai_life/`），均非本插件代码。标注「未确认」的结论没有读过源码或没有跑过检查，不要当作事实使用。
+> **引用约定**：所有 `文件:行号`（如 `plugin.py:938`）均相对 `Mai_life/` 目录，即 `plugin.py:938` 指 `Mai_life/plugin.py` 第 936 行；行号会随代码漂移，检索时以标识符为主、行号为辅。少数引用来自 MaiBot Plugin SDK 源码副本（以 `(SDK 2.8.0) maibot_sdk/...` 标注）或 `docs/` 下既有文档（相对 `Mai_life/`），均非本插件代码。标注「未确认」的结论没有读过源码或没有跑过检查，不要当作事实使用。
 >
 > **验证声明**：各章的「本机实测/验证记录」是撰稿人当次会话真实运行过的命令与输出；未运行的检查一律显式标注「未运行」，不用当作通过证据。汇总见 §12.1.4。
 
@@ -21,7 +21,7 @@
   - [1.5 全部 Hook 注册点（7 个）与各自职责](#15-全部-hook-注册点7-个与各自职责)
   - [1.6 生命周期：`on_load` / `on_unload` / `on_config_update`](#16-生命周期on_load--on_unload--on_config_update)
   - [1.7 命令注册形态：11 个 `@Command`](#17-命令注册形态11-个-command)
-  - [1.8 API 注册形态：18 个 `@API`（6 公开 + 12 私有）+ 2 个 `@Tool` + 1 个 `@HomeCard`](#18-api-注册形态18-个-api6-公开--12-私有-2-个-tool--1-个-homecard)
+  - [1.8 API 注册形态：18 个 `@API`（6 公开 + 12 私有）+ 3 个 `@Tool` + 1 个 `@HomeCard`](#18-api-注册形态18-个-api6-公开--12-私有-3-个-tool--1-个-homecard)
   - [1.9 后台循环族：`_start_tasks` 的六个循环与 `_maintenance_tick`](#19-后台循环族_start_tasks-的六个循环与-_maintenance_tick)
   - [1.10 依赖与降级：`requirements.txt`](#110-依赖与降级requirementstxt)
   - [1.11 汇总：维护者最常踩的坑](#111-汇总维护者最常踩的坑)
@@ -167,14 +167,14 @@
 
 1. **状态数值只由确定性规则推进，LLM 不得直接改写**：`LifeStateEngine.advance` 是唯一改写核心数值的入口（`life/life_state.py:79`，铁律注释在 `life/life_state.py:78`）；场景增量 `apply_deltas` 也只接受四个钳位键（`life/life_state.py:190-195`）。
 2. **单写者存储**：全部业务状态在一个 SQLite 文件，由 `LifeStore` 以「一条连接 + 一个 `asyncio.Lock`」串行化（`core/storage.py:35-37`），复合写套 `BEGIN IMMEDIATE`（`core/storage.py:124-134`）。服务层不各自持有连接。
-3. **撤回三道防线 + 墓碑先行**：持久墓碑先落库（`messaging/recall_service.py:149` 注释），Replyer 输出后、发送前（两次）、持久查询三层复核（`plugin.py:1336`、`plugin.py:1476`、`plugin.py:1520`、`plugin.py:1531`，`core/storage.py:1312`）。
-4. **平台确认才结算**：主动额度只在 `mark_pending_sent`（`core/storage.py:1078-1125`，调用点 `plugin.py:1574`）累加；唤醒是两段式（候选 `wake_candidates` → 发送成功后 `commit_for_send`，`life/rest_gate.py:116-122`、`life/rest_gate.py:201-206`）。
-5. **防抖输家必须 abort**：`MessageDebouncer.collect` 返回 `allowed=False` 时调用方必须 `abort`（`plugin.py:991`、`plugin.py:1065-1066`），否则同一条消息会被两个 Hook 各处理一遍，产生重复回复。
+3. **撤回三道防线 + 墓碑先行**：持久墓碑先落库（`messaging/recall_service.py:149` 注释），Replyer 输出后、发送前（两次）、持久查询三层复核（`plugin.py:1338`、`plugin.py:1478`、`plugin.py:1522`、`plugin.py:1533`，`core/storage.py:1312`）。
+4. **平台确认才结算**：主动额度只在 `mark_pending_sent`（`core/storage.py:1078-1125`，调用点 `plugin.py:1576`）累加；唤醒是两段式（候选 `wake_candidates` → 发送成功后 `commit_for_send`，`life/rest_gate.py:134-140`、`life/rest_gate.py:224-229`）。
+5. **防抖输家必须 abort**：`MessageDebouncer.collect` 返回 `allowed=False` 时调用方必须 `abort`（`plugin.py:993`、`plugin.py:1067-1068`），否则同一条消息会被两个 Hook 各处理一遍，产生重复回复。
 6. **隐私分层**：日记只有 owner 可读（`life/memory_service.py:256-266`）；群摘要原文绝不入库、敏感内容模型前拒（`social/group_observer.py:141`）；搜索 Key 只出指纹、原始 Key 从不入库（`information/search_service.py:75`、`core/storage.py:428`）；搜索词过隐私清洗（`information/search_service.py:127`）。
-7. **失败开放与降级**：`_is_recalled` 存储异常时放行（`plugin.py:843-846`）；模型不可用走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`）。
-8. **热更新期间消息「不增强但放行」**：`_reloading` 标志让所有 Hook 直接 continue（`plugin.py:951` 等）；`on_config_update` 里 `config_data` 已被 SDK 落进 `self.config`，方法开头 `del config_data,version`（`plugin.py:328`），不要自解析传入字典。
-9. **命令 pattern 是单一事实来源**：`_command_pattern_res()` 导入时从 `__maibot_component_info__` 实时收集（`plugin.py:2761-2772`），新增命令必须走 `@Command`，手写派发会被「未识别指令」兜底误伤。
-10. **新服务必须手动加进热更新分发元组**：`plugin.py:345-349`（17 个服务），漏加的症状是「保存配置不生效，重启才好」，没有任何编译期检查会提醒你（v1.14.8 真实事故见 §2.6.3）。
+7. **失败开放与降级**：`_is_recalled` 存储异常时放行（`plugin.py:845-848`）；模型不可用走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`）。
+8. **热更新期间消息「不增强但放行」**：`_reloading` 标志让所有 Hook 直接 continue（`plugin.py:953` 等）；`on_config_update` 里 `config_data` 已被 SDK 落进 `self.config`，方法开头 `del config_data,version`（`plugin.py:330`），不要自解析传入字典。
+9. **命令 pattern 是单一事实来源**：`_command_pattern_res()` 导入时从 `__maibot_component_info__` 实时收集（`plugin.py:2806-2817`），新增命令必须走 `@Command`，手写派发会被「未识别指令」兜底误伤。
+10. **新服务必须手动加进热更新分发元组**：`plugin.py:347-351`（17 个服务），漏加的症状是「保存配置不生效，重启才好」，没有任何编译期检查会提醒你（v1.14.8 真实事故见 §2.6.3）。
 
 ### 改动前必看的测试
 
@@ -211,14 +211,14 @@
 | `sdk` | `min_version: 2.7.0`，`max_version: 2.99.99` | Plugin SDK 版本区间（`_manifest.json:16-19`）。注意代码里 `_resolve_data_dir` 为「SDK 2.6+ 才有 `ctx.paths.data_dir`」写了回退分支（`plugin.py:241-248`），而清单已要求 ≥2.7.0——该回退是防御性冗余，正常路径永远不会走插件内 `data/`。 |
 | `dependencies` | `playwright>=1.49,<2` | 声明式 Python 依赖，只列了 `playwright`（`_manifest.json:20-26`）；`requirements.txt` 另有三项（见 §1.10）。两处清单不一致本身是事实，谁在部署时消费 `requirements.txt` **未确认**。 |
 | `plugin_type` | `extension` | 插件类型为扩展（`_manifest.json:27`）。按 MaiBot 插件开发技能文档，`plugin_type` 可选、缺省即 `extension`（外部技能文档 `~/.agents/skills/maibot-plugin-dev/SKILL.md:69`，非仓库文件）；此处显式声明。其余取值语义不在本轮通读范围内，**未确认**。 |
-| `capabilities` | 15 项 | Host 授予的能力白名单（`_manifest.json:28-44`）：`send.text`、`send.image`、`chat.get_all_streams`、`chat.get_stream_by_user_id`、`chat.get_private_streams`、`chat.get_stream_by_group_id`、`chat.get_group_streams`、`chat.open_session`、`llm.generate`、`llm.get_available_models`、`message.get_by_id`、`api.call`、`maisaka.proactive.trigger`、`config.get`、`component.list_loaded_plugins`（共 15 项）。其中 `send.image` 自 v1.23.0 移除本地生图链后，唯一消费者是 `mai_life_browse_web` 的网页截图（`plugin.py:1696`）。`plugin.py` 内直接出现的只有 `ctx.config.get`（`plugin.py:529`、`plugin.py:532`）、`ctx.chat.get_stream_by_user_id`（`plugin.py:665`）、`ctx.chat.get_private_streams`（`plugin.py:674`）、`ctx.component.list_loaded_plugins`（`plugin.py:551`）与 `ctx.paths.data_dir`（`plugin.py:246`），其余能力由各服务模块内部使用——增删 capability 时必须全仓库核对，不能只搜 `plugin.py`。 |
+| `capabilities` | 15 项 | Host 授予的能力白名单（`_manifest.json:28-44`）：`send.text`、`send.image`、`chat.get_all_streams`、`chat.get_stream_by_user_id`、`chat.get_private_streams`、`chat.get_stream_by_group_id`、`chat.get_group_streams`、`chat.open_session`、`llm.generate`、`llm.get_available_models`、`message.get_by_id`、`api.call`、`maisaka.proactive.trigger`、`config.get`、`component.list_loaded_plugins`（共 15 项）。其中 `send.image` 自 v1.23.0 移除本地生图链后，唯一消费者是 `mai_life_browse_web` 的网页截图（`plugin.py:1698`）。`plugin.py` 内直接出现的只有 `ctx.config.get`（`plugin.py:531`、`plugin.py:534`）、`ctx.chat.get_stream_by_user_id`（`plugin.py:667`）、`ctx.chat.get_private_streams`（`plugin.py:676`）、`ctx.component.list_loaded_plugins`（`plugin.py:553`）与 `ctx.paths.data_dir`（`plugin.py:246`），其余能力由各服务模块内部使用——增删 capability 时必须全仓库核对，不能只搜 `plugin.py`。 |
 | `i18n` | `zh-CN` 唯一 | 默认与支持语种都只有简体中文（`_manifest.json:45-50`）；所有用户可见文案都是硬编码中文，没有多语言机制。 |
 | `urls` | 仓库/主页/文档 | 三个 URL 均指向 GitHub 与 `docs.mai-mai.org`（`_manifest.json:51-55`）。 |
 | `display.icon` | `type: local`、`value: mailife.png`、`fallback: fish`、`background: #BFE3F2` | 本地图标（`_manifest.json:56-63`）：优先用插件目录内的 `mailife.png`（该文件确实存在于插件根，已由目录列举确认），缺失时回退内置 `fish` 图标，并指定浅蓝底色 `#BFE3F2`。与 WebUI 页面图标、HomeCard 图标是三套互不相干的机制，详见 §9.4。 |
 
 ### 1.2 包入口：`__init__.py` 与 `create_plugin`
 
-`__init__.py` 只有四行：docstring、`from .plugin import MaiLifePlugin, create_plugin`、`__all__`（`__init__.py:1-4`）。SDK 约定的插件工厂是模块级 `create_plugin()`，实现在 `plugin.py:2791`——`def create_plugin()->MaiBotPlugin:return MaiLifePlugin()`。Host 加载时调用它拿到 `MaiBotPlugin` 子类实例；`__init__.py` 的再导出只是让 `from Mai_life import create_plugin` 也可用。**新增导出符号时必须同步 `__all__`**，否则 `from Mai_life import *` 与静态检查会漏掉。
+`__init__.py` 只有四行：docstring、`from .plugin import MaiLifePlugin, create_plugin`、`__all__`（`__init__.py:1-4`）。SDK 约定的插件工厂是模块级 `create_plugin()`，实现在 `plugin.py:2836`——`def create_plugin()->MaiBotPlugin:return MaiLifePlugin()`。Host 加载时调用它拿到 `MaiBotPlugin` 子类实例；`__init__.py` 的再导出只是让 `from Mai_life import create_plugin` 也可用。**新增导出符号时必须同步 `__all__`**，否则 `from Mai_life import *` 与静态检查会漏掉。
 
 ### 1.3 `MaiLifePlugin` 类骨架
 
@@ -227,22 +227,22 @@
 - `config_model = MaiLifeSettings`（`plugin.py:182`）：把强类型配置模型挂到类上，`self.config` 即 `MaiLifeSettings` 实例（定义在 `config.py:1182`）。所有服务共享同一个已校验实例，不存在各服务各持一份字典的情况。
 - `config_reload_subscriptions: ClassVar[Iterable[str]] = ("bot","model")`（`plugin.py:183`）：除插件自身 scope（`self`）外，还订阅主程序 `bot`（角色名/人格）与 `model`（模型路由）两个 scope 的热更新，二者分别走 `on_config_update` 的对应分支（见 §1.6）。
 - `__init__`（`plugin.py:185-219`）只声明运行态，不做任何 I/O：18 个服务属性全部先置 `None`（`plugin.py:188-205`），外加 `_bot_name="麦麦"` 兜底（`plugin.py:195`）、绘图联动内存态（`plugin.py:207-209`）、任务登记表 `_tasks`/`_transient`/`_message_tasks`（`plugin.py:209-210`）、`_maintenance_lock`（`plugin.py:211`）与 `_stopping`/`_reloading` 两个标志（`plugin.py:219`）。
-- `_ready` 属性（`plugin.py:221-226`）：18 个属性（`_store`、`_env`、`_llm`、`_state`、`_schedule`、`_rest`、`_proactive`、`_debouncer`、`_continuity`、`_memory`、`_information`、`_group_observer`、`_relay`、`_bookshelf`、`_creation`、`_admin`、`_recall`、`_bedtime`）全部非 `None` 才算装配完成。**坑：`_command_replies` 不在 `_ready` 清单里**，它另有懒重建路径 `_require_command_replies`（`plugin.py:1749-1753`）——测试/兼容上下文里 logger 缺失也不能挡住命令发送。
+- `_ready` 属性（`plugin.py:221-226`）：18 个属性（`_store`、`_env`、`_llm`、`_state`、`_schedule`、`_rest`、`_proactive`、`_debouncer`、`_continuity`、`_memory`、`_information`、`_group_observer`、`_relay`、`_bookshelf`、`_creation`、`_admin`、`_recall`、`_bedtime`）全部非 `None` 才算装配完成。**坑：`_command_replies` 不在 `_ready` 清单里**，它另有懒重建路径 `_require_command_replies`（`plugin.py:1794-1798`）——测试/兼容上下文里 logger 缺失也不能挡住命令发送。
 
-`ctx`（Host 能力代理）的挂法分两档：需要 Host RPC 的服务收整个 `ctx`——`LLMService`（`plugin.py:273`）、`ProactiveEngine`（`plugin.py:278`）、`RecallService`（`plugin.py:280`）、`InformationService`（`plugin.py:283`）、`RelayService`（`plugin.py:285`）、`CreationService`（`plugin.py:287`）、`BedtimeManager`（`plugin.py:290`）、`CommandReplyService`（`plugin.py:289`）；纯逻辑服务只收 `self.ctx.logger`（`plugin.py:274-277`、`281-282`、`284`、`288`），`LifeStore` 收 `getattr(self.ctx,"logger",None)`（`plugin.py:267`）以容忍 logger 缺失。这样拆分让不碰 Host 的模块可在缺少 ctx 的环境里单测。
+`ctx`（Host 能力代理）的挂法分两档：需要 Host RPC 的服务收整个 `ctx`——`LLMService`（`plugin.py:275`）、`ProactiveEngine`（`plugin.py:280`）、`RecallService`（`plugin.py:282`）、`InformationService`（`plugin.py:285`）、`RelayService`（`plugin.py:287`）、`CreationService`（`plugin.py:289`）、`BedtimeManager`（`plugin.py:292`）、`CommandReplyService`（`plugin.py:291`）；纯逻辑服务只收 `self.ctx.logger`（`plugin.py:276-279`、`281-282`、`284`、`288`），`LifeStore` 收 `getattr(self.ctx,"logger",None)`（`plugin.py:269`）以容忍 logger 缺失。这样拆分让不碰 Host 的模块可在缺少 ctx 的环境里单测。
 
 ### 1.4 `on_load`：装配顺序（1 Store + 17 服务 + 命令发送层）
 
-`on_load`（`plugin.py:260-301`）的顺序不是随意排的，注释 `plugin.py:272` 点明了主线：**所有服务共享同一 Store 和强类型配置；LLM 路由先于任何会调用模型的服务创建**。执行序列：
+`on_load`（`plugin.py:262-303`）的顺序不是随意排的，注释 `plugin.py:274` 点明了主线：**所有服务共享同一 Store 和强类型配置；LLM 路由先于任何会调用模型的服务创建**。执行序列：
 
-1. **复位与登记表**：`self._stopping=False`（`plugin.py:262`）；`_active_tasks.update_retention(...)` 与 `reset()`（`plugin.py:263-264`）清掉上次运行残留的主动/转述任务归因。
-2. **数据目录**：`root=os.path.dirname(os.path.abspath(__file__))`（`plugin.py:265`），`_resolve_data_dir(root)`（`plugin.py:240-258`）优先取 `ctx.paths.data_dir`，并首次加载时把旧版插件内 `data/` 下 `mai_life.db*`（含 `-journal` 与 `.corrupt/.incompatible` 备份）整体搬迁到新数据目录（`plugin.py:250-257`），避免升级后「数据丢失」。此处的 `data/` 是旧版本在插件目录内的运行期目录；当前版本的库文件只落在 Host 数据目录，仓库里同样没有 `data/`。
-3. **Store**：`LifeStore(data_dir, journal_mode="delete", logger=...)` 后立即 `initialize()`（`plugin.py:266-268`）；`journal_mode="delete"` 为回滚日志模式，适配插件热重载频繁的场景（连接模型与崩溃保护详见 §3.1）。随后按开关清理撤回摘要缓存（`plugin.py:269-270`）并恢复中断的创作 claim（`plugin.py:271`）。
-4. **17 个服务**（`plugin.py:273-290`，顺序即依赖顺序）：
+1. **复位与登记表**：`self._stopping=False`（`plugin.py:264`）；`_active_tasks.update_retention(...)` 与 `reset()`（`plugin.py:265-266`）清掉上次运行残留的主动/转述任务归因。
+2. **数据目录**：`root=os.path.dirname(os.path.abspath(__file__))`（`plugin.py:267`），`_resolve_data_dir(root)`（`plugin.py:240-260`）优先取 `ctx.paths.data_dir`，并首次加载时把旧版插件内 `data/` 下 `mai_life.db*`（含 `-journal` 与 `.corrupt/.incompatible` 备份）整体搬迁到新数据目录（`plugin.py:252-259`），避免升级后「数据丢失」。此处的 `data/` 是旧版本在插件目录内的运行期目录；当前版本的库文件只落在 Host 数据目录，仓库里同样没有 `data/`。
+3. **Store**：`LifeStore(data_dir, journal_mode="delete", logger=...)` 后立即 `initialize()`（`plugin.py:268-270`）；`journal_mode="delete"` 为回滚日志模式，适配插件热重载频繁的场景（连接模型与崩溃保护详见 §3.1）。随后按开关清理撤回摘要缓存（`plugin.py:271-272`）并恢复中断的创作 claim（`plugin.py:273`）。
+4. **17 个服务**（`plugin.py:275-292`，顺序即依赖顺序）：
    `LLMService`(273) → `EnvironmentService`(274) → `LifeStateEngine`(275) → `ScheduleService`(276) → `RestGate`(277) → `ProactiveEngine`(278) → `MessageDebouncer`(279) → `RecallService`(280) → `ContinuityService`(281) → `MemoryService`(282) → `InformationService`(283) → `GroupObserver`(284) → `RelayService`(285) → `BookshelfService`(286) → `CreationService`(287) → `AdminService`(288) → `CommandReplyService`(289) → `BedtimeManager`(290)。
-   「17 个服务」的权威口径来自 `on_config_update` 的 `scope=="self"` 全量下发清单（`plugin.py:345-349`）：恰好这 17 个（不含 `_store` 与 `_command_replies`）。`_llm` 排第一是因为状态机、日程、闸门、记忆、见闻、创作都要调模型；`_bedtime` 排最后因为它同时依赖 `_env` 与 `_state`（`plugin.py:290`）。
-5. **装配后同步**（`plugin.py:292-297`）：`sync_users` 把配置里的私聊用户档案落库；`_information.prepare()`；`_refresh_personality()` 读 `personality.personality` 与 `bot.nickname`（`plugin.py:528-534`）并经 `_apply_bot_name` 分发给七个会写提示词的服务（`plugin.py:536-545`）；`_resolve_all_streams()` 为没有 `stream_id` 的用户解析私聊流（`plugin.py:685-690`）；`_llm.refresh_health()`；`_check_drawpic()` 探测麦麦绘图插件是否已注册（`plugin.py:554-567`）。
-6. **条件启动**（`plugin.py:298-300`）：仅当 `config.plugin.enabled` 为真才跑一次离线维护 tick（`allow_weather_network=False`，启动不打网）、启动后台循环、并补一个强制刷天气的临时任务。**坑：插件以关闭态发布时，`on_load` 不建任何循环**，要等一次配置热更新才恢复调度（`plugin.py:355-358`）。
+   「17 个服务」的权威口径来自 `on_config_update` 的 `scope=="self"` 全量下发清单（`plugin.py:347-351`）：恰好这 17 个（不含 `_store` 与 `_command_replies`）。`_llm` 排第一是因为状态机、日程、闸门、记忆、见闻、创作都要调模型；`_bedtime` 排最后因为它同时依赖 `_env` 与 `_state`（`plugin.py:292`）。
+5. **装配后同步**（`plugin.py:294-299`）：`sync_users` 把配置里的私聊用户档案落库；`_information.prepare()`；`_refresh_personality()` 读 `personality.personality` 与 `bot.nickname`（`plugin.py:530-536`）并经 `_apply_bot_name` 分发给七个会写提示词的服务（`plugin.py:538-547`）；`_resolve_all_streams()` 为没有 `stream_id` 的用户解析私聊流（`plugin.py:687-692`）；`_llm.refresh_health()`；`_check_drawpic()` 探测麦麦绘图插件是否已注册（`plugin.py:556-569`）。
+6. **条件启动**（`plugin.py:300-302`）：仅当 `config.plugin.enabled` 为真才跑一次离线维护 tick（`allow_weather_network=False`，启动不打网）、启动后台循环、并补一个强制刷天气的临时任务。**坑：插件以关闭态发布时，`on_load` 不建任何循环**，要等一次配置热更新才恢复调度（`plugin.py:357-360`）。
 
 ### 1.5 全部 Hook 注册点（7 个）与各自职责
 
@@ -250,79 +250,79 @@
 
 | # | Hook 点 | 方法（装饰器行号） | mode / order / timeout | 职责（详见） |
 |---|---|---|---|---|
-| 1 | `chat.receive.before_process` | `on_receive`（`plugin.py:936`） | `BLOCKING` / `EARLY` / `30000ms` | 消息总入口：撤回通知、手滑命令、群/私聊路由。§5.2、§10.1 |
-| 2 | `maisaka.planner.before_request` | `on_planner`（`plugin.py:1237`） | `BLOCKING` | 任务归因激活 + Planner 背景注入。§5.6、§10.1 |
-| 3 | `maisaka.planner.after_response` | `on_planner_after`（`plugin.py:1278`） | `OBSERVE` | 只做 Token 记账（`record_observed(source="host_planner")`），不改载荷。§3.7 |
-| 4 | `maisaka.replyer.before_request` | `on_replyer`（`plugin.py:1288`） | `BLOCKING` | Replyer 注入裁剪后背景并**消费**休息积压。§5.8 |
-| 5 | `maisaka.replyer.after_response` | `on_replyer_after`（`plugin.py:1323`） | `BLOCKING` | 发送前收口：13 道抑制闸门 + 落待发送确认记录。§5.8 |
-| 6 | `send_service.before_send` | `on_send_before`（`plugin.py:1447`） | `BLOCKING` | 平台发送前最后复核：撤回墓碑、候选有效性、任务发送权。§5.9 |
-| 7 | `send_service.after_send` | `on_send_after`（`plugin.py:1539`） | `OBSERVE` | 以平台实际结果收口：唤醒、主动额度、契机归还。§5.9 |
+| 1 | `chat.receive.before_process` | `on_receive`（`plugin.py:938`） | `BLOCKING` / `EARLY` / `30000ms` | 消息总入口：撤回通知、手滑命令、群/私聊路由。§5.2、§10.1 |
+| 2 | `maisaka.planner.before_request` | `on_planner`（`plugin.py:1239`） | `BLOCKING` | 任务归因激活 + Planner 背景注入。§5.6、§10.1 |
+| 3 | `maisaka.planner.after_response` | `on_planner_after`（`plugin.py:1280`） | `OBSERVE` | 只做 Token 记账（`record_observed(source="host_planner")`），不改载荷。§3.7 |
+| 4 | `maisaka.replyer.before_request` | `on_replyer`（`plugin.py:1290`） | `BLOCKING` | Replyer 注入裁剪后背景并**消费**休息积压。§5.8 |
+| 5 | `maisaka.replyer.after_response` | `on_replyer_after`（`plugin.py:1325`） | `BLOCKING` | 发送前收口：13 道抑制闸门 + 落待发送确认记录。§5.8 |
+| 6 | `send_service.before_send` | `on_send_before`（`plugin.py:1449`） | `BLOCKING` | 平台发送前最后复核：撤回墓碑、候选有效性、任务发送权。§5.9 |
+| 7 | `send_service.after_send` | `on_send_after`（`plugin.py:1541`） | `OBSERVE` | 以平台实际结果收口：唤醒、主动额度、契机归还。§5.9 |
 
-**为什么这样分模式**：只有需要改载荷或阻止流程的点用 `BLOCKING`（1、2、4、5、6）；纯观察/记账的点用 `OBSERVE`（3、7），失败不影响主链。`on_receive` 额外声明 `order=EARLY` 与 `timeout_ms=30000`——它是收口与防抖的发生地，30 秒预算内要完成合并等待外的全部本地判定（`plugin.py:936`；绘图判定的 3.2s 子预算见 `plugin.py:592-596`）。`on_replyer_after` 到 `on_send_before` 之间存在 await 间隙，代码在交接处**反复复核**撤回/取消状态（`plugin.py:1520`、`1531`），因为真实入站可能在此期间取消旧轮次。
+**为什么这样分模式**：只有需要改载荷或阻止流程的点用 `BLOCKING`（1、2、4、5、6）；纯观察/记账的点用 `OBSERVE`（3、7），失败不影响主链。`on_receive` 额外声明 `order=EARLY` 与 `timeout_ms=30000`——它是收口与防抖的发生地，30 秒预算内要完成合并等待外的全部本地判定（`plugin.py:938`；绘图判定的 3.2s 子预算见 `plugin.py:594-598`）。`on_replyer_after` 到 `on_send_before` 之间存在 await 间隙，代码在交接处**反复复核**撤回/取消状态（`plugin.py:1522`、`1531`），因为真实入站可能在此期间取消旧轮次。
 
 ### 1.6 生命周期：`on_load` / `on_unload` / `on_config_update`
 
-- **`on_unload`（`plugin.py:303-318`）**：先 `_stopping=True` 阻止新工作进入 → 关防抖器与群观察器（`plugin.py:306-307`）→ `_stop_tasks()` 取消并等待全部后台/临时任务（`plugin.py:393-398`）→ 重置任务登记表 → 关联网见闻与撤回服务 → 清空全部内存运行态 → 最后 `await self._store.close()`（`plugin.py:316`）。顺序保证卸载时没有悬挂协程再访问 SQLite。`_command_replies` 被置回 `None`（`plugin.py:317`）以彻底断开发送能力。
-- **`on_config_update`（`plugin.py:320-324`）**：用 `_reloading` 标志包住完整热更新（`try/finally`），让所有 Hook 在更新期间读到一致状态——7 个 Hook 的入口都检查 `self._reloading` 并直接放行（如 `plugin.py:951`、`1240`、`1291`），即热更新窗口内消息**不增强但也不阻断**（失败开放）。
-- **`_apply_config_update`（`plugin.py:326-359`）**：先停调度，再按 scope 分发，最后按新开关恢复：
-  - 入参 `config_data` 与 `version` 被显式 `del`（`plugin.py:328`）——**不要试图自己解析 `config_data`**，此时 `self.config` 已是新实例；
-  - 保留 `_active_tasks` 登记表（只更新 retention），注释 `plugin.py:330` 说明 WebUI 每次保存都重置会让进行中的任务失去归因；
-  - `scope=="self"`：17 个服务逐个 `update_config(self.config)`（`plugin.py:345-349`，与 §1.4 装配名单一致），并联动清理撤回摘要缓存、`sync_users`、`_information.prepare()`、`_check_drawpic()`，按启用用户裁剪 `_session_runtime`（`plugin.py:356-358`）；
-  - `scope=="bot"`：只刷人格与角色名（`plugin.py:352`）；
-  - `scope in {"self","model"}`：只刷模型健康（`plugin.py:353`）；
-  - 收尾一律 `_resolve_all_streams()`，并在启用时重跑离线维护 tick、重启六类循环、补刷天气（`plugin.py:354-358`；`bot`/`model` scope 不强制刷天气）。
-  - **坑：`_start_tasks` 幂等靠 `if self._tasks:return`（`plugin.py:385`）**，重复热更新不会建重复调度器；但每个循环内部是 `while True + try/except`，异常只记日志不退循环（如 `plugin.py:411-412`），`CancelledError` 才上抛——循环只可能被 `_stop_tasks` 取消，不会「静默死亡」。
+- **`on_unload`（`plugin.py:305-320`）**：先 `_stopping=True` 阻止新工作进入 → 关防抖器与群观察器（`plugin.py:308-309`）→ `_stop_tasks()` 取消并等待全部后台/临时任务（`plugin.py:395-400`）→ 重置任务登记表 → 关联网见闻与撤回服务 → 清空全部内存运行态 → 最后 `await self._store.close()`（`plugin.py:318`）。顺序保证卸载时没有悬挂协程再访问 SQLite。`_command_replies` 被置回 `None`（`plugin.py:319`）以彻底断开发送能力。
+- **`on_config_update`（`plugin.py:322-326`）**：用 `_reloading` 标志包住完整热更新（`try/finally`），让所有 Hook 在更新期间读到一致状态——7 个 Hook 的入口都检查 `self._reloading` 并直接放行（如 `plugin.py:953`、`1240`、`1291`），即热更新窗口内消息**不增强但也不阻断**（失败开放）。
+- **`_apply_config_update`（`plugin.py:328-361`）**：先停调度，再按 scope 分发，最后按新开关恢复：
+  - 入参 `config_data` 与 `version` 被显式 `del`（`plugin.py:330`）——**不要试图自己解析 `config_data`**，此时 `self.config` 已是新实例；
+  - 保留 `_active_tasks` 登记表（只更新 retention），注释 `plugin.py:332` 说明 WebUI 每次保存都重置会让进行中的任务失去归因；
+  - `scope=="self"`：17 个服务逐个 `update_config(self.config)`（`plugin.py:347-351`，与 §1.4 装配名单一致），并联动清理撤回摘要缓存、`sync_users`、`_information.prepare()`、`_check_drawpic()`，按启用用户裁剪 `_session_runtime`（`plugin.py:358-360`）；
+  - `scope=="bot"`：只刷人格与角色名（`plugin.py:354`）；
+  - `scope in {"self","model"}`：只刷模型健康（`plugin.py:355`）；
+  - 收尾一律 `_resolve_all_streams()`，并在启用时重跑离线维护 tick、重启六类循环、补刷天气（`plugin.py:356-360`；`bot`/`model` scope 不强制刷天气）。
+  - **坑：`_start_tasks` 幂等靠 `if self._tasks:return`（`plugin.py:387`）**，重复热更新不会建重复调度器；但每个循环内部是 `while True + try/except`，异常只记日志不退循环（如 `plugin.py:413-414`），`CancelledError` 才上抛——循环只可能被 `_stop_tasks` 取消，不会「静默死亡」。
 
 热更新到达各服务的完整链路、三种 `update_config` 实现形态、v1.14.8 `BedtimeManager` 漏配事故与回归测试，详见 §2.6。
 
 ### 1.7 命令注册形态：11 个 `@Command`
 
-命令全部集中在 `plugin.py:1760-1885`（`cmd_menu` 至 `cmd_rest_test`），共 **11 个**。命名与 pattern 有严格规律：
+命令全部集中在 `plugin.py:1805-1930`（`cmd_menu` 至 `cmd_rest_test`），共 **11 个**。命名与 pattern 有严格规律：
 
-- **中英双名**：每个命令的 `name` 是中文 `/麦麦X`，pattern 用 `^(?:/麦麦X|/mai_x)` 二选一（如 `plugin.py:1806`：`/麦麦状态` 与 `/mai_status`）。
-- **边界前瞻**：无参命令一律以 `(?=\s|$)` 收尾（如 `plugin.py:1771`），防止 `/麦麦状态x` 被误派发；带参命令用命名组 `(?P<...>)`（如 `/麦麦添加日期` 的 `(?P<event_date>\d{4}-\d{2}-\d{2})\s+(?P<event_name>.+)$`，`plugin.py:1775`）。
-- **入口命令兼兜底**：`/麦麦` 的 pattern 带可选 `(?P<content>[\s\S]+)`（`plugin.py:1795`），无 content 或 `help/?/？/帮助` 时出菜单，否则提示未知子命令并出菜单（`plugin.py:1796-1804`）。
+- **中英双名**：每个命令的 `name` 是中文 `/麦麦X`，pattern 用 `^(?:/麦麦X|/mai_x)` 二选一（如 `plugin.py:1851`：`/麦麦状态` 与 `/mai_status`）。
+- **边界前瞻**：无参命令一律以 `(?=\s|$)` 收尾（如 `plugin.py:1816`），防止 `/麦麦状态x` 被误派发；带参命令用命名组 `(?P<...>)`（如 `/麦麦添加日期` 的 `(?P<event_date>\d{4}-\d{2}-\d{2})\s+(?P<event_name>.+)$`，`plugin.py:1820`）。
+- **入口命令兼兜底**：`/麦麦` 的 pattern 带可选 `(?P<content>[\s\S]+)`（`plugin.py:1840`），无 content 或 `help/?/？/帮助` 时出菜单，否则提示未知子命令并出菜单（`plugin.py:1841-1849`）。
 
-全部命令共用同一条发送链：`_command_access` 权限判定（`plugin.py:1724`，**群聊一律拒绝**，仅启用用户或显式管理员可在私聊执行）→ `_send_command`（`plugin.py:1745`）经 `CommandReplyService.send_text_with_fallback` 纯文本发送；菜单走 `_send_command_menu`（`plugin.py:1755`，`build_command_usage_text` 生成菜单文本）。返回值统一为 `tuple[bool,str,int]`。发送细节见 §5.12。
+全部命令共用同一条发送链：`_command_access` 权限判定（`plugin.py:1769`，**群聊一律拒绝**，仅启用用户或显式管理员可在私聊执行）→ `_send_command`（`plugin.py:1790`）经 `CommandReplyService.send_text_with_fallback` 纯文本发送；菜单走 `_send_command_menu`（`plugin.py:1800`，`build_command_usage_text` 生成菜单文本）。返回值统一为 `tuple[bool,str,int]`。发送细节见 §5.12。
 
-**单一事实来源**：`_command_pattern_res()`（`plugin.py:2761-2768`）在导入时从各方法的 `__maibot_component_info__` 实时收集全部 pattern，编译成 `_MAI_COMMAND_RES`（`plugin.py:2772`），供「未识别指令」兜底使用——`_is_unmatched_mai_command`（`plugin.py:925-934`）判断「命令形态 + `/麦麦` 或 `/mai` 开头 + 不命中任何自家 pattern」，命中则回菜单并 `abort`，避免手滑输入落进 AI 闲聊。新增命令不需要再维护第二份正则；反之，绕过 `@Command` 自定义派发会立刻被这个兜底误伤。
+**单一事实来源**：`_command_pattern_res()`（`plugin.py:2806-2813`）在导入时从各方法的 `__maibot_component_info__` 实时收集全部 pattern，编译成 `_MAI_COMMAND_RES`（`plugin.py:2817`），供「未识别指令」兜底使用——`_is_unmatched_mai_command`（`plugin.py:927-936`）判断「命令形态 + `/麦麦` 或 `/mai` 开头 + 不命中任何自家 pattern」，命中则回菜单并 `abort`，避免手滑输入落进 AI 闲聊。新增命令不需要再维护第二份正则；反之，绕过 `@Command` 自定义派发会立刻被这个兜底误伤。
 
-### 1.8 API 注册形态：18 个 `@API`（6 公开 + 12 私有）+ 2 个 `@Tool` + 1 个 `@HomeCard`
+### 1.8 API 注册形态：18 个 `@API`（6 公开 + 12 私有）+ 3 个 `@Tool` + 1 个 `@HomeCard`
 
-- **公开 API 6 个**（`public=True`，均 `version="1"`）：`get_life_state`（`plugin.py:2124`）、`get_current_scene`（`plugin.py:2127`）、`get_schedule`（`plugin.py:2133`）、`get_user_relationship`（`plugin.py:2139`）、`get_environment_snapshot`（`plugin.py:2152`）、`create_proactive_opportunity`（`plugin.py:2158`）。命名规律是 `get_*` 只读动词 + 一个写入型 `create_*`。公开面刻意收窄：`get_user_relationship` 只回关系契约，不暴露 `stream_id`、活跃时间与免打扰时段（`plugin.py:2144-2150`）。
-- **私有 API 12 个**（`public=False`）：`admin_snapshot`（`plugin.py:2177`，注释说明保留给 Host 鉴权桥或插件自身，`plugin.py:2179`）+ 11 个 `webui_*` 前缀（`plugin.py:2190`、`2269`、`2297`、`2350`、`2390`、`2428`、`2462`、`2504`、`2541`、`2583`、`2686`）。`webui_*` 供声明式 `webui.json` 页面按名绑定消费（已在 `webui.json:16`、`20`、`579`、`773`、`777`、`1030`、`1034`、`1628`、`2110`、`2342`、`2346` 逐条核对到 11 个引用；`admin_snapshot` 不在 `webui.json` 中）。注释 `plugin.py:2185` 称「十二个私有 @API」是含 `admin_snapshot` 的口径。**11 个 WebUI API 的逐个契约要点见 §9.4。**
-- **WebUI API 契约**（`plugin.py:2186-2188`）：纯本地聚合、无 LLM/网络调用（远低于 10 秒超时）；任何异常都回 `{"success":False,"error":...}`（每个方法体内 `try/except`，如 `plugin.py:2266-2267`）；时间戳字段一律 epoch 秒，人读字段一律中文；列表与文本全部限量（低于 512KiB）；Key 只出指纹（`plugin.py:2736-2741`）。**改响应键名会直接打破网页**，`_node_view` 的注释（`plugin.py:116-121`）专门警告空节点也必须回键齐全的空字典而非 `null`。
-- **工具 2 个**：`mai_life_web_search`（`plugin.py:1624`，受控联网搜索，禁词剥离/限流/降级都在 `InformationService` 内，见 §7）与 `mai_life_browse_web`（`plugin.py:1662`，Playwright 截图并直发当前会话）。v1.23.1 起群聊/私聊均可用（此前仅限私聊：截图直发当前会话，开放群聊有刷屏面）。`chat_scope` 必须写在组件声明顶层才被 Host 认可（`plugin.py:229-232`），因此重写 `get_components()` 在注册后强行改写（`plugin.py:234-238`）——这是唯一可靠方式，`@Tool` 装饰器参数无效。群聊路由依赖 `tool_browse_web` 透传 `group_id`（`plugin.py:1680`）给 `send_image_bytes_with_fallback`，否则会优先解析到触发用户的私聊会话、把截图误发进 DM。
-- **首页卡片 1 个**：`@HomeCard(name="mai_life_management", ...)`（`plugin.py:2746-2758`），`link_url` 指向 `/plugin-config?plugin=maibot-community.mai-life`（`plugin.py:2753`），即 manifest id 再次出现——改 id 不同步会断链。
+- **公开 API 6 个**（`public=True`，均 `version="1"`）：`get_life_state`（`plugin.py:2169`）、`get_current_scene`（`plugin.py:2172`）、`get_schedule`（`plugin.py:2178`）、`get_user_relationship`（`plugin.py:2184`）、`get_environment_snapshot`（`plugin.py:2197`）、`create_proactive_opportunity`（`plugin.py:2203`）。命名规律是 `get_*` 只读动词 + 一个写入型 `create_*`。公开面刻意收窄：`get_user_relationship` 只回关系契约，不暴露 `stream_id`、活跃时间与免打扰时段（`plugin.py:2189-2195`）。
+- **私有 API 12 个**（`public=False`）：`admin_snapshot`（`plugin.py:2222`，注释说明保留给 Host 鉴权桥或插件自身，`plugin.py:2224`）+ 11 个 `webui_*` 前缀（`plugin.py:2235`、`2269`、`2297`、`2350`、`2390`、`2428`、`2462`、`2504`、`2541`、`2583`、`2686`）。`webui_*` 供声明式 `webui.json` 页面按名绑定消费（已在 `webui.json:16`、`20`、`579`、`773`、`777`、`1030`、`1034`、`1628`、`2110`、`2342`、`2346` 逐条核对到 11 个引用；`admin_snapshot` 不在 `webui.json` 中）。注释 `plugin.py:2230` 称「十二个私有 @API」是含 `admin_snapshot` 的口径。**11 个 WebUI API 的逐个契约要点见 §9.4。**
+- **WebUI API 契约**（`plugin.py:2231-2233`）：纯本地聚合、无 LLM/网络调用（远低于 10 秒超时）；任何异常都回 `{"success":False,"error":...}`（每个方法体内 `try/except`，如 `plugin.py:2311-2312`）；时间戳字段一律 epoch 秒，人读字段一律中文；列表与文本全部限量（低于 512KiB）；Key 只出指纹（`plugin.py:2781-2786`）。**改响应键名会直接打破网页**，`_node_view` 的注释（`plugin.py:116-121`）专门警告空节点也必须回键齐全的空字典而非 `null`。
+- **工具 3 个**：`mai_life_web_search`（`plugin.py:1638`，受控联网搜索，禁词剥离/限流/降级都在 `InformationService` 内，见 §7）、`mai_life_browse_web`（`plugin.py:1676`，Playwright 截图并直发当前会话。v1.23.1 起群聊/私聊均可用）与 `mai_life_get_schedule`（`plugin.py:1744`，**仅群聊**：把麦麦今日时间线、当前段与当前场景交给 LLM，弥补群轮次不注入私聊背景的缺口；实现在 `plugin.py:1752`，载荷格式化 `plugin.py:1726`）。`chat_scope` 必须写在组件声明顶层才被 Host 认可（`plugin.py:238-243`），因此重写 `get_components()` 在注册后强行改写（`plugin.py:244-249`）——这是唯一可靠方式，`@Tool` 装饰器参数无效。群聊路由依赖 `tool_browse_web` 透传 `group_id`（`plugin.py:1720`）给 `send_image_bytes_with_fallback`，否则会优先解析到触发用户的私聊会话、把截图误发进 DM。
+- **首页卡片 1 个**：`@HomeCard(name="mai_life_management", ...)`（`plugin.py:2791-2803`），`link_url` 指向 `/plugin-config?plugin=maibot-community.mai-life`（`plugin.py:2798`），即 manifest id 再次出现——改 id 不同步会断链。
 
 ### 1.9 后台循环族：`_start_tasks` 的六个循环与 `_maintenance_tick`
 
-`_start_tasks`（`plugin.py:383-391`）幂等启动六个命名循环（重复调用直接返回，`plugin.py:385`）；`_stop_tasks`（`plugin.py:393-398`）取消并 `gather` 等待全部后台与临时任务。分工与周期：
+`_start_tasks`（`plugin.py:385-393`）幂等启动六个命名循环（重复调用直接返回，`plugin.py:387`）；`_stop_tasks`（`plugin.py:395-400`）取消并 `gather` 等待全部后台与临时任务。分工与周期：
 
 | 循环 | 周期 | 职责 |
 |---|---|---|
-| `_maintenance_loop`（`plugin.py:414-419`） | `max(60, state.tick_interval_minutes*60)` 秒，默认 10 分钟（`config.py:493-496`） | 周期性调用 `_maintenance_tick`，是生活状态的总维护入口。 |
-| `_daily_generation_loop`（`plugin.py:400-412`） | 每日一次：睡到下一个 `schedule.generate_hour`（默认 03:00，`config.py:1063-1066`）整点，已过则顺延一天（`plugin.py:404-406`） | 强制重生成当日生活框架：先刷天气，再取记忆上下文，`ensure_day(..., force=True)`（`plugin.py:407-410`）。用环境时区 `self._env.now()` 而非本地时间。 |
-| `_bedtime_loop`（`plugin.py:421-428`） | `BEDTIME_LOOP_SECONDS = 60` 秒（`life/bedtime.py:21`） | 睡前流程推进（`BedtimeManager.tick`）。注释 `plugin.py:424` 解释为什么必须 60 秒：`defer`（`sleep_defer_until`）必须新鲜，10 分钟级的维护 tick 会在静默刚达标时误拦仍在进行的对话。 |
-| `_proactive_loop`（`plugin.py:430-437`） | `max(60, proactive.patrol_interval_minutes*60)`，默认 10 分钟（`config.py:1106-1109`） | 先 `_resolve_all_streams()` 补私聊流，再 `ProactiveEngine.patrol` 找主动聊天契机。 |
-| `_information_loop`（`plugin.py:439-454`） | 启用时 60 秒，禁用时 300 秒空转（`plugin.py:442-443`） | 联网见闻巡检：新闻/探索/搜索历史，可把主人的未决话题并进检索（`plugin.py:447-451`）。 |
-| `_creation_loop`（`plugin.py:456-466`） | 启用时 `creation.patrol_interval_minutes`（默认 60 分钟，`config.py:380-382`），禁用时 300 秒空转（`plugin.py:459-461`） | 书柜创作巡检，只在空档判断是否动笔。 |
+| `_maintenance_loop`（`plugin.py:416-421`） | `max(60, state.tick_interval_minutes*60)` 秒，默认 10 分钟（`config.py:493-496`） | 周期性调用 `_maintenance_tick`，是生活状态的总维护入口。 |
+| `_daily_generation_loop`（`plugin.py:402-414`） | 每日一次：睡到下一个 `schedule.generate_hour`（默认 03:00，`config.py:1063-1066`）整点，已过则顺延一天（`plugin.py:406-408`） | 强制重生成当日生活框架：先刷天气，再取记忆上下文，`ensure_day(..., force=True)`（`plugin.py:409-412`）。用环境时区 `self._env.now()` 而非本地时间。 |
+| `_bedtime_loop`（`plugin.py:423-430`） | `BEDTIME_LOOP_SECONDS = 60` 秒（`life/bedtime.py:21`） | 睡前流程推进（`BedtimeManager.tick`）。注释 `plugin.py:426` 解释为什么必须 60 秒：`defer`（`sleep_defer_until`）必须新鲜，10 分钟级的维护 tick 会在静默刚达标时误拦仍在进行的对话。 |
+| `_proactive_loop`（`plugin.py:432-439`） | `max(60, proactive.patrol_interval_minutes*60)`，默认 10 分钟（`config.py:1106-1109`） | 先 `_resolve_all_streams()` 补私聊流，再 `ProactiveEngine.patrol` 找主动聊天契机。 |
+| `_information_loop`（`plugin.py:441-456`） | 启用时 60 秒，禁用时 300 秒空转（`plugin.py:444-445`） | 联网见闻巡检：新闻/探索/搜索历史，可把主人的未决话题并进检索（`plugin.py:449-453`）。 |
+| `_creation_loop`（`plugin.py:458-468`） | 启用时 `creation.patrol_interval_minutes`（默认 60 分钟，`config.py:380-382`），禁用时 300 秒空转（`plugin.py:461-463`） | 书柜创作巡检，只在空档判断是否动笔。 |
 
-`_maintenance_tick`（`plugin.py:475-501`）本体由 `_maintenance_lock` 串行化，顺序即语义：刷天气（启动/热更新时 `allow_weather_network=False` 不打网，`plugin.py:299`、`356`）→ 绘图插件复检 → 日程 `ensure_day`/`expand_due` → **先跑 `BedtimeManager.tick` 再推进相位**（注释 `plugin.py:489`：静默刚达标时先更新 defer/回睡，`advance` 才不会按旧值提前睡过去）→ 按日程边界切片离线推进 `advance_timeline` → 逐小时状态快照（`INSERT OR IGNORE` 每小时一条）→ 记忆日记 → `_settle_relationships` 按自然日补算关系（最多回看一年，`plugin.py:503` 起）→ 清理运行记录（`RECORD_RETENTION_DAYS` 来自 `core/storage.py:22`，`plugin.py:22`、`498-501`）。**两个循环都碰睡前状态但周期不同（60s vs 10min），是刻意设计而非疏漏**；把 bedtime 合并进 maintenance tick 会引入注释 `plugin.py:424` 描述的误拦。完整时序见 §11.1。
+`_maintenance_tick`（`plugin.py:477-503`）本体由 `_maintenance_lock` 串行化，顺序即语义：刷天气（启动/热更新时 `allow_weather_network=False` 不打网，`plugin.py:301`、`356`）→ 绘图插件复检 → 日程 `ensure_day`/`expand_due` → **先跑 `BedtimeManager.tick` 再推进相位**（注释 `plugin.py:491`：静默刚达标时先更新 defer/回睡，`advance` 才不会按旧值提前睡过去）→ 按日程边界切片离线推进 `advance_timeline` → 逐小时状态快照（`INSERT OR IGNORE` 每小时一条）→ 记忆日记 → `_settle_relationships` 按自然日补算关系（最多回看一年，`plugin.py:505` 起）→ 清理运行记录（`RECORD_RETENTION_DAYS` 来自 `core/storage.py:22`，`plugin.py:22`、`498-501`）。**两个循环都碰睡前状态但周期不同（60s vs 10min），是刻意设计而非疏漏**；把 bedtime 合并进 maintenance tick 会引入注释 `plugin.py:426` 描述的误拦。完整时序见 §11.1。
 
 ### 1.10 依赖与降级：`requirements.txt`
 
-`requirements.txt` 列三项：`playwright>=1.49,<2`（`requirements.txt:1`）、`chinese-calendar>=1.0,<2`（`requirements.txt:5`，工作日/节假日/调休）、`lunar-python>=1.4,<2`（`requirements.txt:6`，农历节气）。文件内注释（`requirements.txt:3-4`）写明设计立场：**缺失时代码有降级守卫（环境自动降级），但安装失败不由插件文件兜底，由部署环境保证装齐**——对应到代码：Playwright 缺失按错误类别透传（`plugin.py:1683-1689`）、绘图/节假日类增强在 `EnvironmentService` 内静默降级。**坑：manifest `dependencies` 只声明了 `playwright`**（`_manifest.json:20-26`），另两项仅存在于 `requirements.txt`；部署链路是否读取 `requirements.txt` **未确认**，更换宿主或打包方式时需重新验证。
+`requirements.txt` 列三项：`playwright>=1.49,<2`（`requirements.txt:1`）、`chinese-calendar>=1.0,<2`（`requirements.txt:5`，工作日/节假日/调休）、`lunar-python>=1.4,<2`（`requirements.txt:6`，农历节气）。文件内注释（`requirements.txt:3-4`）写明设计立场：**缺失时代码有降级守卫（环境自动降级），但安装失败不由插件文件兜底，由部署环境保证装齐**——对应到代码：Playwright 缺失按错误类别透传（`plugin.py:1685-1691`）、绘图/节假日类增强在 `EnvironmentService` 内静默降级。**坑：manifest `dependencies` 只声明了 `playwright`**（`_manifest.json:20-26`），另两项仅存在于 `requirements.txt`；部署链路是否读取 `requirements.txt` **未确认**，更换宿主或打包方式时需重新验证。
 
 ### 1.11 汇总：维护者最常踩的坑
 
-1. **改清单 id 不同步改代码**：`PLUGIN_ID`（`messaging/task_context.py:11`）、`HOST_TASK_PREFIX`（`messaging/task_context.py:12`）、HomeCard 的 `link_url`（`plugin.py:2753`）三处硬编码依赖 manifest id。
-2. **`_ready` 不含 `_command_replies`**：判定「服务就绪」看 18 项（`plugin.py:221-226`），命令发送层另有懒重建（`plugin.py:1749-1753`）。
-3. **`on_config_update` 里 `config_data` 已被 SDK 落进 `self.config`**：方法开头 `del config_data,version`（`plugin.py:328`），自解析传入字典会读到旧值。
-4. **热更新窗口是「不增强但放行」**：`_reloading` 期间 Hook 直接 `continue`（`plugin.py:951` 等），此时段消息不进任何增强链，排查「某条回复没有背景」要先看清时间线。
-5. **循环周期分两档是故意的**：bedtime 60s（defer 新鲜度）vs maintenance 10min（成本），合并会误拦对话（`plugin.py:424`）。
-6. **插件关闭态发布不建循环**：`on_load` 的条件分支（`plugin.py:298`）意味着 `plugin.enabled=false` 时只有一次配置热更新能唤醒调度。
-7. **命令 pattern 是双份消费者**：Host 派发 + 导入期收集的兜底检测（`plugin.py:2772`）；新增命令务必走 `@Command`，勿手写派发。
+1. **改清单 id 不同步改代码**：`PLUGIN_ID`（`messaging/task_context.py:11`）、`HOST_TASK_PREFIX`（`messaging/task_context.py:12`）、HomeCard 的 `link_url`（`plugin.py:2798`）三处硬编码依赖 manifest id。
+2. **`_ready` 不含 `_command_replies`**：判定「服务就绪」看 18 项（`plugin.py:221-226`），命令发送层另有懒重建（`plugin.py:1794-1798`）。
+3. **`on_config_update` 里 `config_data` 已被 SDK 落进 `self.config`**：方法开头 `del config_data,version`（`plugin.py:330`），自解析传入字典会读到旧值。
+4. **热更新窗口是「不增强但放行」**：`_reloading` 期间 Hook 直接 `continue`（`plugin.py:953` 等），此时段消息不进任何增强链，排查「某条回复没有背景」要先看清时间线。
+5. **循环周期分两档是故意的**：bedtime 60s（defer 新鲜度）vs maintenance 10min（成本），合并会误拦对话（`plugin.py:426`）。
+6. **插件关闭态发布不建循环**：`on_load` 的条件分支（`plugin.py:300`）意味着 `plugin.enabled=false` 时只有一次配置热更新能唤醒调度。
+7. **命令 pattern 是双份消费者**：Host 派发 + 导入期收集的兜底检测（`plugin.py:2817`）；新增命令务必走 `@Command`，勿手写派发。
 8. **WebUI 私有 API 的键名即契约**：网页按名取值，空数据也要回键齐全的空结构（`plugin.py:116-121`、`2227`）。
 
 ### 1.12 未确认事项
@@ -330,7 +330,7 @@
 - `plugin_type` 除 `extension` 外还有哪些取值、各自语义：未在本轮通读的四个文件内出现，仅从技能文档确认缺省值为 `extension`。
 - `capabilities` 中 `api.call`、`maisaka.proactive.trigger`、`message.get_by_id`、`chat.open_session`、`chat.get_all_streams`、`chat.get_stream_by_group_id`、`chat.get_group_streams`、`llm.get_available_models` 的具体调用点：`plugin.py` 内未直接出现，应分散在服务模块，本章未逐一核对。
 - `requirements.txt` 由谁在何时安装（Host 自动安装 / 部署脚本 / 手动）：四个文件内无信息。
-- `HookMode`/`HookOrder` 枚举的完整取值与 `timeout_ms` 上限：仅从使用处（`plugin.py:936` 等）确认了 `BLOCKING`/`OBSERVE`/`EARLY` 与 30000ms 的写法，枚举定义在 SDK 内，未读。
+- `HookMode`/`HookOrder` 枚举的完整取值与 `timeout_ms` 上限：仅从使用处（`plugin.py:938` 等）确认了 `BLOCKING`/`OBSERVE`/`EARLY` 与 30000ms 的写法，枚举定义在 SDK 内，未读。
 
 ---
 
@@ -491,7 +491,7 @@ for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']):
 
 | 字段 | 默认值（约束） | 语义 |
 | --- | --- | --- |
-| `tick_interval_minutes` | `10`（1~60） | 状态推进间隔；同时是维护循环的 sleep 基数（`config.py:493-500`、`plugin.py:417`） |
+| `tick_interval_minutes` | `10`（1~60） | 状态推进间隔；同时是维护循环的 sleep 基数（`config.py:493-500`、`plugin.py:419`） |
 | `body_cycle_enabled` | `false` | 身体周期模拟总开关，默认关（`config.py:501-508`） |
 | `body_cycle_start_date` | `""` | 周期第 1 天，`YYYY-MM-DD`；仅启用后使用（`config.py:509-516`） |
 | `body_cycle_length_days` | `28`（20~45） | 完整周期长度（`config.py:517-524`） |
@@ -525,13 +525,13 @@ for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']):
 | `wake_probability` | `0.18`（0~1） | probability 模式普通消息叫醒概率（`config.py:778-785`） |
 | `llm_threshold` | `70`（0~100） | LLM 模式分数阈值（`config.py:786-793`） |
 | `awake_grace_minutes` | `30`（0~240） | 叫醒后免重复判醒的缓冲（`config.py:794-801`） |
-| `gate_segment_types` | `["sleep","nap"]` | `list[Literal[...]]`；夜窗/午休窗内一定生效，列出的日程类型任意时间也生效（OR 语义）；清空则只按时间窗控制（`config.py:802-810`） |
+| `gate_segment_types` | `["sleep","nap"]` | `list[Literal[...]]`；夜窗/午休窗内一定生效，本列表是时间窗未配置（起止相同）时的兜底 + rest 等无对应窗口类型的开关（时间窗优先，v1.23.3）；清空则只按时间窗控制（`config.py:802-810`） |
 | `force_wake_terms` | 12 个中文词（救命/急事/报警/醒醒/快醒/叫醒/出事了/很难受/撑不住/危险/轻生/自杀） | 含任意一词无视勿扰词与概率立即放行（`config.py:811-817`） |
 | `night_start`/`night_end`/`nap_start`/`nap_end` | `"22:30"`/`"08:00"`/`"12:00"`/`"14:30"` | 时间窗支持跨午夜；起=止时该窗永不生效；非法值按各自默认回落（`config.py:818-833`、`881-888`） |
 | `group_enabled` | `false` | 群聊休息闸门总开关；窗内只有含强制词的消息被回复，其余静默且不进主程序（`config.py:836-840`） |
 | `group_mode` | `"all"` | `all`=所有群；`selected`=只对社交白名单中开了「夜间静音」的群（`config.py:841-846`） |
 | `group_night_*`/`group_nap_*` | 同私聊默认值 | 群时间窗，独立于私聊（`config.py:847-862`） |
-| `group_gate_segment_types` | `["sleep","nap"]` | ⚠ `list[str]` 自由文本，无 Literal 校验，拼错静默失效（`config.py:863-872`） |
+| `group_gate_segment_types` | `["sleep","nap"]` | `list[Literal[...]]` 纯选择 8 段型（v1.23.3 起；此前 `list[str]` 自由文本，拼错静默失效）；与私聊同构的时间窗优先（`config.py:863-872`） |
 | `group_force_wake_terms` | 同私聊 12 词 | 群强制唤醒词，独立于私聊词表（`config.py:873-879`） |
 
 #### 2.3.7 `[context]` 被动回复增强（`ContextSettings`，`config.py:891-917`）
@@ -559,14 +559,14 @@ for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']):
 | `merge_separator` | `"\n"` | 多条文本合并分隔符（`config.py:944-951`） |
 | `ignore_empty_message` | `true` | 无主体内容的消息不进防抖窗直接放行（`config.py:952-959`） |
 | `log_detail` | `true` | 防抖过程日志（`config.py:960-967`） |
-| `outbound_turn_guard`/`turn_expire_seconds` | `true` / `120`（20~600） | 同轮回复防重与轮次锁过期；热更新时同步给 `ActiveTaskRegistry`（`config.py:968-969`、`plugin.py:331`） |
+| `outbound_turn_guard`/`turn_expire_seconds` | `true` / `120`（20~600） | 同轮回复防重与轮次锁过期；热更新时同步给 `ActiveTaskRegistry`（`config.py:968-969`、`plugin.py:333`） |
 
 #### 2.3.9 `[recall]` 撤回增强（`RecallSettings`，`config.py:972-1009`）
 
 | 字段 | 默认值（约束） | 语义 |
 | --- | --- | --- |
 | `enabled` | `true` | 唯一范围开关，私聊+群聊同一套取消规则；需适配器转发 OneBot 撤回通知（`config.py:978-985`） |
-| `cache_summary_enabled` | `false` | 短期保存本人私聊撤回摘要；只存短文本+媒介类型，不存二进制；热更新关闭时立即清库（`config.py:986-993`、`plugin.py:343-345`） |
+| `cache_summary_enabled` | `false` | 短期保存本人私聊撤回摘要；只存短文本+媒介类型，不存二进制；热更新关闭时立即清库（`config.py:986-993`、`plugin.py:345-347`） |
 | `summary_ttl_minutes` | `10`（1~60） | 可查询摘要保留时间（`config.py:994-1001`） |
 | `summary_max_chars` | `240`（40~1000） | 单条撤回文字摘要上限（`config.py:1002-1009`） |
 
@@ -721,7 +721,7 @@ for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']):
 | 字段 | 默认值（约束） | 语义 |
 | --- | --- | --- |
 | `enabled` | `true` | 记录插件与观察到的 Host 模型用量；不设每日限额（`config.py:1050`） |
-| `retention_days` | `30`（1~365） | 调用明细保留天数；每日聚合可长期保留（`config.py:1051`、`plugin.py:491-494`） |
+| `retention_days` | `30`（1~365） | 调用明细保留天数；每日聚合可长期保留（`config.py:1051`、`plugin.py:493-496`） |
 
 #### 2.3.20 `[linkage]` 插件联动（`LinkageSettings`，`config.py:1164-1179`）
 
@@ -783,7 +783,7 @@ print('sections:', list(type(cfg).model_fields.keys()))
 
 `PLUGIN_VERSION = "1.23.0"` 定义在 `config.py:15`（与 `CONFIG_SCHEMA_VERSION` 相邻但语义无关）。消费点：
 
-- 入口日志：`plugin.py:301`（加载完成横幅）、`plugin.py:2069`（状态指令）、`plugin.py:2214`（WebUI 状态数据）；
+- 入口日志：`plugin.py:303`（加载完成横幅）、`plugin.py:2114`（状态指令）、`plugin.py:2259`（WebUI 状态数据）；
 - HTTP User-Agent：`information/http_client.py:18`（`Mai_life/1.23.0 (+https://github.com/octmicy/Mai_life)`）；
 - 管理概览版本：`management/admin_service.py:120`；
 - 导入点：`plugin.py:18`。
@@ -801,44 +801,44 @@ WebUI 保存配置
   → Runner 规范化（补齐缺失字段 + 校验）并替换插件级配置实例
       （SDK: set_plugin_config → self.config 换为新 MaiLifeSettings 实例，
         (SDK 2.8.0) maibot_sdk/plugin.py:184-220）
-  → MaiLifePlugin.on_config_update(scope, config_data, version)   plugin.py:320-324
-      → _apply_config_update(scope, ...)                          plugin.py:326-359
-          1. await self._stop_tasks()                              plugin.py:329
-          2. 刷新 ActiveTaskRegistry 保留期、清运行态字典            plugin.py:331-334
-          3. scope=="self"：17 个服务逐个 update_config(self.config) plugin.py:345-349
+  → MaiLifePlugin.on_config_update(scope, config_data, version)   plugin.py:322-326
+      → _apply_config_update(scope, ...)                          plugin.py:328-361
+          1. await self._stop_tasks()                              plugin.py:331
+          2. 刷新 ActiveTaskRegistry 保留期、清运行态字典            plugin.py:333-336
+          3. scope=="self"：17 个服务逐个 update_config(self.config) plugin.py:347-351
              附带的 store 级动作（清撤回摘要 / sync_users /
-             information.prepare / drawpic 检测 / session_runtime 过滤）plugin.py:356-358
-          4. scope=="bot"：刷新人格与角色名并分发给各服务           plugin.py:352、528-545
-          5. scope in {"self","model"}：llm.refresh_health()       plugin.py:353
-          6. _resolve_all_streams()                                plugin.py:354
+             information.prepare / drawpic 检测 / session_runtime 过滤）plugin.py:358-360
+          4. scope=="bot"：刷新人格与角色名并分发给各服务           plugin.py:354、528-545
+          5. scope in {"self","model"}：llm.refresh_health()       plugin.py:355
+          6. _resolve_all_streams()                                plugin.py:356
           7. plugin.enabled 时重启六类后台循环；非 bot/model scope
-             额外强制刷新天气                                      plugin.py:355-358
+             额外强制刷新天气                                      plugin.py:357-360
 ```
 
-关键点：`on_config_update` 的 `config_data`/`version` 两个入参被 `del` 丢弃（`plugin.py:328`）——插件不信任回调里的原始字典，统一重新读 `self.config`（SDK 已替换的强类型实例）。`config_reload_subscriptions = ("bot","model")`（`plugin.py:183`）只声明对两类全局广播的订阅；插件自身 `config.toml` 的变化固定走 `on_config_update(scope="self")`（SDK 契约 `(SDK 2.8.0) maibot_sdk/plugin.py:51-57`）。
+关键点：`on_config_update` 的 `config_data`/`version` 两个入参被 `del` 丢弃（`plugin.py:330`）——插件不信任回调里的原始字典，统一重新读 `self.config`（SDK 已替换的强类型实例）。`config_reload_subscriptions = ("bot","model")`（`plugin.py:183`）只声明对两类全局广播的订阅；插件自身 `config.toml` 的变化固定走 `on_config_update(scope="self")`（SDK 契约 `(SDK 2.8.0) maibot_sdk/plugin.py:51-57`）。
 
 #### 2.6.2 分发名单与三种 `update_config` 形态
 
-`scope=="self"` 时分发 17 个服务，名单与 §1.4 的装配顺序完全一致（`plugin.py:345-349`）。各服务实现分三类：
+`scope=="self"` 时分发 17 个服务，名单与 §1.4 的装配顺序完全一致（`plugin.py:347-351`）。各服务实现分三类：
 
 1. **纯换引用**（大多数）：`update_config(config)` 就是 `self.config = config`，如 `core/llm_service.py:21-22`、`life/rest_gate.py:17`、`life/proactive.py:14`、`life/life_state.py:43`、`life/schedule_service.py:65`、`life/continuity.py:13`、`life/memory_service.py:27`、`messaging/recall_service.py:35`、`messaging/message_pipeline.py:145`、`social/group_observer.py:37`、`social/relay_service.py:18`、`creation/bookshelf_service.py:16`、`creation/inspiration_service.py:18`、`information/news_service.py:21`、`management/admin_service.py:49`。
 2. **链式转发**：`InformationService` 转发给 `SearchService`+`NewsService`（`information/information_service.py:33-34`）；`CreationService` 转发给 `InspirationService`（`creation/creation_service.py:42-43`）。这两个是聚合服务，子服务不在插件分发名单里，靠父服务代发。
 3. **带副作用**：`SearchService` 重置 `_prepared`/`_reset_runtime` 并安排关闭 Playwright 浏览器（`information/search_service.py:52-55`）；`EnvironmentService` 在城市变化时清掉内存地理编码缓存并置脏（`core/environment.py:70-76`）；`BedtimeManager` 的 docstring 直接写明"WebUI 保存配置后必须换到新实例，否则晚安/推迟一直用旧的闸门时间"（`life/bedtime.py:38-40`）。
 
-`_reloading` 守卫（`plugin.py:322`、`324`）让消息 Hook 在热更新期间直接放行而不读半新半旧的服务状态（检查点 `plugin.py:951`、`992`、`1067`）；先 `_stop_tasks()` 再分发、最后按新开关重启循环，保证循环体内读到的间隔、开关都是新值（`plugin.py:329`、`355-356`）。
+`_reloading` 守卫（`plugin.py:324`、`324`）让消息 Hook 在热更新期间直接放行而不读半新半旧的服务状态（检查点 `plugin.py:953`、`992`、`1067`）；先 `_stop_tasks()` 再分发、最后按新开关重启循环，保证循环体内读到的间隔、开关都是新值（`plugin.py:331`、`355-356`）。
 
 #### 2.6.3 回归测试与历史 bug
 
 `tests/test_fixes.py:2233-2248`（`test_config_update_reaches_bedtime_manager`）是这条链路的回归测试：改 `rest_gate.night_start` → `set_plugin_config` → `_apply_config_update("self", {}, "")` → 断言 `plugin._bedtime.config is plugin.config` 且新时间立即生效。它记录的 v1.14.8 bug 与 CHANGELOG 条目（`CHANGELOG.md:253`）是同一件事：`BedtimeManager` 曾被漏出 `_apply_config_update` 的分发列表，导致"WebUI 保存后闸门用新时间，而晚安提示/入睡推迟一直持有 on_load 时的旧时间，直到重启插件才生效"。
 
-**为什么这样设计**：服务在 `on_load` 一次性构造并捕获配置实例（`plugin.py:273-290`），SDK 在热更新时替换的是插件级实例；不重新指向，每个服务将永远持有旧对象——v1.14.8 的 bug 正是漏配一个服务的后果。按 scope 分发（而非每次全量重放）则让 bot/model 类广播不必重启整套服务（`CHANGELOG.md:497`）。
+**为什么这样设计**：服务在 `on_load` 一次性构造并捕获配置实例（`plugin.py:275-292`），SDK 在热更新时替换的是插件级实例；不重新指向，每个服务将永远持有旧对象——v1.14.8 的 bug 正是漏配一个服务的后果。按 scope 分发（而非每次全量重放）则让 bot/model 类广播不必重启整套服务（`CHANGELOG.md:497`）。
 
 **容易踩的坑**：
 
-1. **新增服务必须手动加进 `plugin.py:345-349` 的分发元组**——漏加的症状是"保存配置不生效，重启才好"，且没有任何编译期或启动期检查会提醒你（历史事故见上）。
+1. **新增服务必须手动加进 `plugin.py:347-351` 的分发元组**——漏加的症状是"保存配置不生效，重启才好"，且没有任何编译期或启动期检查会提醒你（历史事故见上）。
 2. `_command_replies`、`_prompts`（PromptBuilder）不在名单里，因为它们的构造不依赖 `MaiLifeSettings`（`plugin.py:201`、`281`）；给它们加配置依赖时别忘了同步加分发。
-3. 内存运行态不会被 `update_config` 清空：群轮次表等由 `_apply_config_update` 显式清理（`plugin.py:339-341`），但绘图联动频控（`_moment_hints`/`_moment_judges`）与防抖 burst 都不在其列——前者只在 `on_unload`（`plugin.py:322`）清空，后者 `update_config` 只替换 config（`messaging/message_pipeline.py:145`），热更新路径（`plugin.py:333-358`）两者都不清；新增运行态字典时要评估是否加入清理，否则热更新后可能串轮次。
-4. `scope=="bot"` 只刷人格/角色名，不动插件配置；角色名通过 `set_bot_name`/`set_personality` 单独分发（`plugin.py:536-545`），与 `update_config` 是两条并行通道。
+3. 内存运行态不会被 `update_config` 清空：群轮次表等由 `_apply_config_update` 显式清理（`plugin.py:341-343`），但绘图联动频控（`_moment_hints`/`_moment_judges`）与防抖 burst 都不在其列——前者只在 `on_unload`（`plugin.py:324`）清空，后者 `update_config` 只替换 config（`messaging/message_pipeline.py:145`），热更新路径（`plugin.py:335-360`）两者都不清；新增运行态字典时要评估是否加入清理，否则热更新后可能串轮次。
+4. `scope=="bot"` 只刷人格/角色名，不动插件配置；角色名通过 `set_bot_name`/`set_personality` 单独分发（`plugin.py:538-547`），与 `update_config` 是两条并行通道。
 
 ### 2.7 设计理由与容易踩的坑（汇总）
 
@@ -847,14 +847,14 @@ WebUI 保存配置
 1. **单一强类型根模型**：默认 TOML、WebUI Schema、校验、热更新四件事都从 `MaiLifeSettings` 派生，消掉"文档/模板/代码"三处漂移。
 2. **元数据与字段同文件**：`_ui()` 让每个字段的中文标签、提示、顺序、i18n 就在声明旁边，维护字段时顺手维护文案；`config.toml.example` 的注释与 hint 互为表里。
 3. **默认值保守 + 显式确认**：联网、社交、创作等高成本/高敏感能力默认全关；创作还加 `plaintext_storage_acknowledged` 二次确认（`config.py:377-379`）。
-4. **失败开放与降级**：时间非法回落默认（`config.py:62-65`）、天气/模型失败有本地规则兜底（`config.py:349` hint 语义）、防抖与撤回查询失败开放（`plugin.py:989-990`、`855-856`）。
+4. **失败开放与降级**：时间非法回落默认（`config.py:62-65`）、天气/模型失败有本地规则兜底（`config.py:349` hint 语义）、防抖与撤回查询失败开放（`plugin.py:991-992`、`855-856`）。
 5. **热更新按 scope 最小化影响面**：self 才全量分发，bot/model 只走各自通道（§2.6）。
 
 **容易踩的坑**（除 §2.2.5、§2.4.3、§2.6.3 已展开的外，补充）：
 
 1. **两套 order 元数据漂移**：根模型字段 `_ui(order)` 与子类 `__ui_order__` 数值不一致（如 `schedule`：11 vs 5、`proactive`：12 vs 6、`news`：15 vs 14），且本机复现证明 SDK 节 Schema 只用子类值——改父字段 order 不产生任何效果（§2.2.5）。
 2. **`enum_labels` 可能到不了界面**：SDK 2.8.0 的节 Schema 生成器不搬运 `enum_labels`/`x-enumNames`（本机复现负结果）；能否显示取决于 Host WebUI 读哪份 Schema，**未确认**。改枚举译名时不要假设它一定生效。
-3. **自由文本列表无校验**：`group_gate_segment_types`（`config.py:863`）与 `creation.allowed_schedule_types`（`config.py:389`）是 `list[str]`，拼错类型名静默失效；对照 `gate_segment_types`、`news.allowed_schedule_types`、`search.allowed_schedule_types` 用 `list[Literal[...]]` 有校验——新增同类字段时优先用 Literal。
+3. **自由文本列表无校验**：`creation.allowed_schedule_types`（`config.py:389`）是 `list[str]`，拼错类型名静默失效；对照 `gate_segment_types`、`news.allowed_schedule_types`、`search.allowed_schedule_types`，以及 v1.23.3 起改为 Literal 的 `group_gate_segment_types`，均用 `list[Literal[...]]` 有校验——新增同类字段时优先用 Literal。
 4. **`llm_model` 是死字段**：`plugin.llm_model`（`config.py:95-102`）全仓库无读取点，仅为兼容旧配置存在；排查"模型没按预期走"时不要看它，看 `[models]` 与 `core/llm_service.py:55-82` 的回退链。
 5. **时间格式零填充**：`_TIME_RE` 只接受 `HH:MM`（`config.py:17`），`8:00` 会被回落默认值；起止相同的时间窗永不生效（`config.py:820` hint 与 `_in_window` 语义一致，见 `life/rest_gate.py:23-24`）。
 6. **QQ 号必须字符串**：TOML 里裸长整数有精度风险（`config.toml.example:15`）；`_qq_id` 允许空串（占位 profile）但拒绝非数字，填错直接 ValidationError。
@@ -865,7 +865,7 @@ WebUI 保存配置
 
 ### 2.8 未确认事项
 
-1. **Runner 的行为细节不在本仓库**：`rebuild_plugin_config_data`（版本升级重建）的触发时机、`config.toml` 的落盘路径与写入策略、`scope` 取值集合的完整枚举（代码只处理 `self`/`bot`/`model`，SDK docstring 亦只列这三种，`(SDK 2.8.0) maibot_sdk/plugin.py:473`）均未在仓库内证实。
+1. **Runner 的行为细节不在本仓库**：`rebuild_plugin_config_data`（版本升级重建）的触发时机、`config.toml` 的落盘路径与写入策略、`scope` 取值集合的完整枚举（代码只处理 `self`/`bot`/`model`，SDK docstring 亦只列这三种，`(SDK 2.8.0) maibot_sdk/plugin.py:475`）均未在仓库内证实。
 2. **Host WebUI 渲染用的 Schema 来源未确认**：是 `generate_plugin_config_schema` 的输出还是 pydantic 原始 JSON Schema，直接决定 `enum_labels`/`x-enumNames` 与根字段 `_ui` 元数据是否生效（§2.2.5）。
 3. **部署环境的实际 SDK 版本未确认**：本机复现用的是 SDK 2.8.0 源码副本（`D:/workdoc/love/maibot-plugin-sdk-latest`）；`_manifest.json:17-18` 允许 2.7.0–2.99.99，且 `core/llm_service.py:27` 提到"SDK 2.8.1 起"的 `task_name` 行为差异，说明线上版本可能更新——上述 SDK 行号结论以 2.8.0 为准。
 4. **同序 `__ui_order__` 的节最终排序未确认**（§2.1.2），取决于 WebUI 对相等 order 的排序稳定性。
@@ -910,10 +910,10 @@ WebUI 保存配置
 
 | 项 | 值 / 行为 | 位置 |
 | --- | --- | --- |
-| 文件路径 | 运行期数据目录下的单一 SQLite 库文件（`<data_dir>/mai_life.db`，见 §3.1），`initialize()` 时 `mkdir(parents=True, exist_ok=True)`；`data_dir` 是**运行期**解析出的目录（优先 `ctx.paths.data_dir`，见 §1.4），本仓库内没有 `data/` 目录，库文件只存在于运行环境的 Host 数据目录 | `core/storage.py:34-35`、`core/storage.py:55`、`plugin.py:240-258` |
+| 文件路径 | 运行期数据目录下的单一 SQLite 库文件（`<data_dir>/mai_life.db`，见 §3.1），`initialize()` 时 `mkdir(parents=True, exist_ok=True)`；`data_dir` 是**运行期**解析出的目录（优先 `ctx.paths.data_dir`，见 §1.4），本仓库内没有 `data/` 目录，库文件只存在于运行环境的 Host 数据目录 | `core/storage.py:34-35`、`core/storage.py:55`、`plugin.py:240-260` |
 | 行工厂 | `sqlite3.Row`，读出来直接 `dict(row)` | `core/storage.py:82` |
 | 忙等待 | `PRAGMA busy_timeout=5000`，写冲突最多等 5 秒 | `core/storage.py:83` |
-| journal_mode | 生产 `delete`（回滚日志落盘，保崩溃回滚）；测试默认 `memory`（不残留 `-journal` 文件） | `plugin.py:266-267`、`core/storage.py:39-41`、`core/storage.py:84` |
+| journal_mode | 生产 `delete`（回滚日志落盘，保崩溃回滚）；测试默认 `memory`（不残留 `-journal` 文件） | `plugin.py:268-269`、`core/storage.py:39-41`、`core/storage.py:84` |
 | 事务 | 复合写一律 `BEGIN IMMEDIATE`，异常 `rollback` 后上抛 | `core/storage.py:124-134` |
 | 关闭 | `close()` 先 `commit()` 再 `close()` | `core/storage.py:614-619` |
 
@@ -984,8 +984,8 @@ recall_events / group_user_activity）和 `core/storage.py:473-477`（global_sta
 | `sleep_runtime` | `id=1` 单行；`phase`/`started_at`/`awake_grace_until`/`woken_count`/`last_event`/`sleep_defer_until` | 睡眠相位与宽限/推迟 | `save_sleep_runtime`（`life/bedtime.py:85`、`life/life_state.py:155`、`:174`） |
 | `dreams` | `created_at`/`content`/`mood_delta`/`energy_delta`/`sleep_started_at` | 梦境记录 | `add_dream`（`life/life_state.py:248`） |
 | `dream_fragments` | `dream_id`/`position`/`content`，`UNIQUE(dream_id,position)` | 梦境碎片（一篇最多 5 条、每条 300 字符） | 随 `add_dream` 同事务写入（`core/storage.py:725-729`） |
-| `state_snapshots` | `ts` 主键（**整点桶**）；`energy`/`hunger`/`mood_valence`/`mood_arousal`/`sleep_phase`/`current_activity` | 逐小时状态轨迹，长期动力学分析与 WebUI 历史曲线 | `save_state_snapshot`（`plugin.py:488` 维护 tick；`life/life_state.py:186` 离线补算逐小时）；读方 `recent_state_snapshots`（`plugin.py:2275`） |
-| `mood_events` | `created_at`/`day`/`kind`/`delta` | 心情加分账本（每次互动加分一条） | `record_mood_event`（`plugin.py:525` 统一入口；`creation/creation_service.py:208` 归档加成） |
+| `state_snapshots` | `ts` 主键（**整点桶**）；`energy`/`hunger`/`mood_valence`/`mood_arousal`/`sleep_phase`/`current_activity` | 逐小时状态轨迹，长期动力学分析与 WebUI 历史曲线 | `save_state_snapshot`（`plugin.py:490` 维护 tick；`life/life_state.py:186` 离线补算逐小时）；读方 `recent_state_snapshots`（`plugin.py:2320`） |
+| `mood_events` | `created_at`/`day`/`kind`/`delta` | 心情加分账本（每次互动加分一条） | `record_mood_event`（`plugin.py:527` 统一入口；`creation/creation_service.py:208` 归档加成） |
 
 设计要点：`save_state_snapshot` 用 `INSERT OR IGNORE` + 整点取整主键，天然幂等，重复 tick
 不会写花（`core/storage.py:669-681`）。`record_mood_event` 是单条 SQL 原子加分，先查当日次数
@@ -999,8 +999,8 @@ recall_events / group_user_activity）和 `core/storage.py:473-477`（global_sta
 | --- | --- | --- | --- |
 | `daily_framework` | `id`/`day`/`start_minute`/`end_minute`/`kind`/`summary`/`location`/`energy_load`/`shareability` | 每日日程框架（按「一天第几分钟」定位） | `replace_framework`（`life/schedule_service.py`、`life/memory_service.py:178`） |
 | `detailed_scenes` | `framework_id` 主键；`scene`/`state_deltas`(JSON)/`applied` | 临近场景细化与待应用状态增量 | `save_scene`（`life/schedule_service.py:316`）；`mark_scene_applied`（`life/life_state.py:184`） |
-| `proactive_opportunities` | `id`/`framework_id`/`topic`/`motive`/`weight`/`privacy`/`target_user_id`/`expires_at`/`consumed_by`/`consumed_at` | 主动发言契机池 | `add_opportunity`（`life/life_state.py:253`、`life/memory_service.py:222`、`information/information_service.py:162`、`:242`、`social/group_observer.py:234`、`creation/creation_service.py:364`、`plugin.py:2171`）；日期契机走 `add_date_opportunity_once`（`life/memory_service.py:249`）；消费/释放在 `life/proactive.py:96` 与 `plugin.py`；过期释放在 `core/storage.py:1150-1153` |
-| `important_dates` | `user_id`/`event_name`/`event_date`/`recurrence`/`source`/`source_message_id` | 已确认的重要日期（生日/纪念日等） | `add_important_date`（`life/memory_service.py:86`、`:122`、`plugin.py:1877`）；候选确认写入 `confirm_date_candidate`（`plugin.py:1896`） |
+| `proactive_opportunities` | `id`/`framework_id`/`topic`/`motive`/`weight`/`privacy`/`target_user_id`/`expires_at`/`consumed_by`/`consumed_at` | 主动发言契机池 | `add_opportunity`（`life/life_state.py:253`、`life/memory_service.py:222`、`information/information_service.py:162`、`:242`、`social/group_observer.py:234`、`creation/creation_service.py:364`、`plugin.py:2216`）；日期契机走 `add_date_opportunity_once`（`life/memory_service.py:249`）；消费/释放在 `life/proactive.py:96` 与 `plugin.py`；过期释放在 `core/storage.py:1150-1153` |
+| `important_dates` | `user_id`/`event_name`/`event_date`/`recurrence`/`source`/`source_message_id` | 已确认的重要日期（生日/纪念日等） | `add_important_date`（`life/memory_service.py:86`、`:122`、`plugin.py:1922`）；候选确认写入 `confirm_date_candidate`（`plugin.py:1941`） |
 | `date_candidates` | `user_id`/`event_name`/`date_text`/`suggested_date`/`confidence`/`status`/`source_summary` | 待用户确认的模糊日期候选 | `add_date_candidate`（`life/memory_service.py:95`、`:126`） |
 | `date_trigger_events` | `date_id`/`occurrence_date`/`lead_days` 联合主键 | 某次日期发生×提前天数的去重标记（补算保护） | `add_date_opportunity_once`（`life/memory_service.py:249`，与契机写入同一事务）；删除在 `core/storage.py:1417`、`core/storage.py:2184` |
 
@@ -1015,15 +1015,15 @@ recall_events / group_user_activity）和 `core/storage.py:473-477`（global_sta
 
 | 表 | 关键列 | 用途 | 写入方 |
 | --- | --- | --- | --- |
-| `users` | `user_id` 主键；`enabled`/`proactive_enabled`/`role`/`daily_proactive_max`/`temperature`/`quiet_start`/`quiet_end`/`stream_id`/`last_user_message_at`/`last_proactive_at`/`proactive_day`/`proactive_count`/`last_relation_day` | 用户档案、关系温度、主动额度 | `sync_users`（`plugin.py:292`、`:346`）；`record_interaction` 更新 `last_user_message_at`（`core/storage.py:913`）；`update_relationships` 按日结算温度（`plugin.py:519`）；`mark_pending_sent` 累计主动额度（`core/storage.py:1114-1116`）；`set_user_stream`/`update_user_display_name`（`plugin.py`） |
-| `interaction_events` | `user_id`/`created_at`/`kind`(`message`/`proactive_response`)/`hour`/`content_summary`(≤240 字符)/`source_message_id` | 互动流水（活跃时段、日记计数、撤回溯源） | `record_interaction`（`plugin.py:1080`，同事务写 message 事件并识别 2 小时内的主动回应）；删除在 `core/storage.py:1404` |
-| `proactive_events` | `id`/`user_id`/`opportunity_id`/`stream_id`/`status`/`created_at`/`expires_at`/`sent_at`/`host_task_id` | 主动发送事件状态机（pending→sent/expired/failed/cancelled） | `add_proactive_pending`（`life/proactive.py:98`）；`set_proactive_task_id`/`set_proactive_event_status`（`life/proactive.py`、`plugin.py`）；`mark_pending_sent`（`plugin.py:1574`）；`expire_pending`（`life/proactive.py:43`） |
+| `users` | `user_id` 主键；`enabled`/`proactive_enabled`/`role`/`daily_proactive_max`/`temperature`/`quiet_start`/`quiet_end`/`stream_id`/`last_user_message_at`/`last_proactive_at`/`proactive_day`/`proactive_count`/`last_relation_day` | 用户档案、关系温度、主动额度 | `sync_users`（`plugin.py:294`、`:346`）；`record_interaction` 更新 `last_user_message_at`（`core/storage.py:913`）；`update_relationships` 按日结算温度（`plugin.py:521`）；`mark_pending_sent` 累计主动额度（`core/storage.py:1114-1116`）；`set_user_stream`/`update_user_display_name`（`plugin.py`） |
+| `interaction_events` | `user_id`/`created_at`/`kind`(`message`/`proactive_response`)/`hour`/`content_summary`(≤240 字符)/`source_message_id` | 互动流水（活跃时段、日记计数、撤回溯源） | `record_interaction`（`plugin.py:1082`，同事务写 message 事件并识别 2 小时内的主动回应）；删除在 `core/storage.py:1404` |
+| `proactive_events` | `id`/`user_id`/`opportunity_id`/`stream_id`/`status`/`created_at`/`expires_at`/`sent_at`/`host_task_id` | 主动发送事件状态机（pending→sent/expired/failed/cancelled） | `add_proactive_pending`（`life/proactive.py:98`）；`set_proactive_task_id`/`set_proactive_event_status`（`life/proactive.py`、`plugin.py`）；`mark_pending_sent`（`plugin.py:1576`）；`expire_pending`（`life/proactive.py:43`） |
 | `proactive_skip_stats` | `user_id`/`reason`/`day`/`count`，联合主键 | 主动候选跳过原因聚合，供 WebUI「系统与配置」页主动候选诊断 | `record_proactive_skip`（`life/proactive.py:49`、`:70`、`:75`、`:78`、`:80` 等）；过期事件记 `planner_no_reply`（`core/storage.py:1159-1163`） |
-| `rest_backlogs` | `user_id`/`created_at`/`summary`/`consumed`/`source_message_id` | 休息期间积压的用户消息摘要 | `add_rest_backlog`（`plugin.py:1098`）；消费 `consume_rest_backlogs`/`peek_rest_backlogs` |
-| `conversation_continuity` | `user_id` 主键；`intent`/`unresolved_topics`(JSON，≤5 条)/`updated_at` | 连续话题意图与未决话题 | `save_continuity`（`life/continuity.py:24`、`:27`、`:42`、`:44`；`plugin.py:868`、`:889` 清空） |
-| `wake_candidates` | `session_id` 主键；`user_id`/`message_id`/`reason`/`expires_at` | 判醒待醒候选（真实发送才消费） | `set_wake_candidate`/`pop_wake_candidate`（`life/rest_gate.py:120`、`:203`）；`clear_wake_candidate`（`plugin.py`） |
+| `rest_backlogs` | `user_id`/`created_at`/`summary`/`consumed`/`source_message_id` | 休息期间积压的用户消息摘要 | `add_rest_backlog`（`plugin.py:1100`）；消费 `consume_rest_backlogs`/`peek_rest_backlogs` |
+| `conversation_continuity` | `user_id` 主键；`intent`/`unresolved_topics`(JSON，≤5 条)/`updated_at` | 连续话题意图与未决话题 | `save_continuity`（`life/continuity.py:24`、`:27`、`:42`、`:44`；`plugin.py:870`、`:889` 清空） |
+| `wake_candidates` | `session_id` 主键；`user_id`/`message_id`/`reason`/`expires_at` | 判醒待醒候选（真实发送才消费） | `set_wake_candidate`/`pop_wake_candidate`（`life/rest_gate.py:138`、`:203`）；`clear_wake_candidate`（`plugin.py`） |
 | `group_user_activity` | `(group_id,user_id)` 主键；`display_name`/`last_active_at`/`source_message_id` | 群成员最近活跃（搜索词隐私清洗、群转私素材） | `record_group_activity`（`social/group_observer.py:83`）；撤回清理由 `clear_recalled_group_activity`（`social/group_observer.py`） |
-| `group_directory` | `group_id` 主键；`group_name`/`stream_id`/`updated_at` | 群号↔会话↔名称目录（名称仅展示） | `upsert_group_directory`（`plugin.py:980`、`:1007`；`social/group_observer.py:79`；`social/relay_service.py:46`） |
+| `group_directory` | `group_id` 主键；`group_name`/`stream_id`/`updated_at` | 群号↔会话↔名称目录（名称仅展示） | `upsert_group_directory`（`plugin.py:982`、`:1007`；`social/group_observer.py:79`；`social/relay_service.py:46`） |
 
 `sync_users` 的语义要注意：它以 WebUI 用户列表为**唯一身份来源**，不在列表里的用户会被
 `enabled=0, proactive_enabled=0` 整体停用（`core/storage.py:879-883`）；`display_name` 每次同步
@@ -1038,7 +1038,7 @@ recall_events / group_user_activity）和 `core/storage.py:473-477`（global_sta
 
 | 表 | 关键列 | 用途 | 写入方 |
 | --- | --- | --- | --- |
-| `reply_turns` | `(session_id,anchor_message_id)` 主键；`status`/`expires_at` | 回复防重：同一锚点只生成一次 | `reserve_reply_turn`/`release_reply_turn`（`plugin.py:1423` 等） |
+| `reply_turns` | `(session_id,anchor_message_id)` 主键；`status`/`expires_at` | 回复防重：同一锚点只生成一次 | `reserve_reply_turn`/`release_reply_turn`（`plugin.py:1425` 等） |
 | `message_turn_sources` | `(session_id,turn_anchor,source_message_id)` 主键；`expires_at` | 合并消息与回复锚点的映射，热重载后仍识别撤回轮次 | `register_message_turn`（`messaging/recall_service.py:87`、`:98`） |
 | `recall_events` | `(session_id,recalled_message_id)` 主键；`notice_type`/`summary`/`summary_expires_at`/`media_types`(JSON)/`expires_at` | 撤回墓碑 + 可选短摘要 | `record_recall_event`（`messaging/recall_service.py:150`、`:178`） |
 
@@ -1096,7 +1096,7 @@ Runner 异常退出后，已有 `final` 修订的文档恢复 `archived` 继续�
 
 | 表 | 关键列 | 用途 | 写入方 |
 | --- | --- | --- | --- |
-| `llm_usage_events` | `created_at`/`source`/`task_name`/`model_name`/`request_type`/`prompt_tokens`/`completion_tokens`/`total_tokens`/`latency_ms`/`success`/`error_summary` | 插件与观察到的 Host 模型调用明细 | `record_llm_usage`：`core/llm_service.py:127`（`source="plugin"`）、`core/llm_service.py:206`（Host 观察）、`information/search_service.py:244`（`source="search_api_model"`）；读方 `usage_summary`（`management/admin_service.py:114`、`plugin.py:2114`、`:2554` 起） |
+| `llm_usage_events` | `created_at`/`source`/`task_name`/`model_name`/`request_type`/`prompt_tokens`/`completion_tokens`/`total_tokens`/`latency_ms`/`success`/`error_summary` | 插件与观察到的 Host 模型调用明细 | `record_llm_usage`：`core/llm_service.py:127`（`source="plugin"`）、`core/llm_service.py:206`（Host 观察）、`information/search_service.py:244`（`source="search_api_model"`）；读方 `usage_summary`（`management/admin_service.py:114`、`plugin.py:2159`、`:2554` 起） |
 | `meta` | `key`/`value` | 目前只存 `schema_version` | `core/storage.py:514` |
 | `weather_cache` | `id=1` 单行；`fetched_at`/`location_name`/`latitude`/`longitude`/`temperature`/`weather_code`/`description`/`raw_json` | 天气缓存（坐标仅运行时缓存） | `save_weather`/`clear_weather`（`core/environment.py:192`、`:141`、`:144`） |
 
@@ -1108,12 +1108,12 @@ Runner 异常退出后，已有 `final` 修订的文档恢复 `archived` 继续�
 | `mood_events`、`state_snapshots` | `STATE_HISTORY_RETENTION_DAYS = 180` 天（动力学分析数据源，比运行记录留得久） | `core/storage.py:27-28`、`core/storage.py:2036-2039` |
 | `rest_backlogs` | 7 天 | `core/storage.py:2000-2001` |
 | `search_api_events` | 90 天 | `core/storage.py:2556` |
-| `llm_usage_events` | `usage.retention_days`，默认 30 天 | `config.py:1051`、调用点 `plugin.py:491-494` |
+| `llm_usage_events` | `usage.retention_days`，默认 30 天 | `config.py:1051`、调用点 `plugin.py:493-496` |
 | `news_items`/`exploration_notes`/`search_history` | 各表 `expires_at` 驱动 | `core/storage.py:2551-2557` |
 
 清理入口与频率：维护循环 `_maintenance_loop` 每 `state.tick_interval_minutes`（默认 10 分钟，
-`config.py:493-500`；`plugin.py:417`）跑一次 `_maintenance_tick`，其中调用
-`cleanup_runtime_records`（`plugin.py:491-494`）；另有 `cleanup_information`
+`config.py:493-500`；`plugin.py:419`）跑一次 `_maintenance_tick`，其中调用
+`cleanup_runtime_records`（`plugin.py:493-496`）；另有 `cleanup_information`
 （`information/information_service.py:119`）、`cleanup_creation`（`creation/creation_service.py:90`）、
 `cleanup_date_candidates`（`life/memory_service.py:141`）按各自周期跑。
 
@@ -1164,7 +1164,7 @@ Runner 异常退出后，已有 `final` 修订的文档恢复 `archived` 继续�
 
 坑：`_WEATHER_CODES` 未覆盖的 weather_code 显示「天气状况未知」（`core/environment.py:185`）；
 `refresh_weather(allow_network=False)` 时直接返回 `天气未知` 而不碰网络
-（`core/environment.py:146-147`），加载期和配置热更新走这条路径（`plugin.py:299`、`:356`）。
+（`core/environment.py:146-147`），加载期和配置热更新走这条路径（`plugin.py:301`、`:356`）。
 
 ### 3.7 llm_service：任务路由、max_output_tokens 与用量统计
 
@@ -1233,13 +1233,13 @@ SDK 兼容：`_generate_call` 探测 `ctx.llm.generate` 签名，SDK 2.8.1+ 支�
 | 记录点 | `source` | `task_name` | `request_type` | `latency_ms` | 位置 |
 | --- | --- | --- | --- | --- | --- |
 | `generate` 每次调用后（成功/失败都记） | `plugin` | 路由后的任务名 | 调用方传入（`generic`/`structured` 等） | 实测耗时 | `core/llm_service.py:122-138`，调用点 `core/llm_service.py:170-172`、`:175` |
-| Host Planner/Replyer 观察值 | `host_planner` / `host_replyer` | `planner` / Host 回传的任务名 | `planner` / `replyer` | 0（观察值无耗时） | `core/llm_service.py:201-213`，调用点 `plugin.py:1284`、`:1354` |
+| Host Planner/Replyer 观察值 | `host_planner` / `host_replyer` | `planner` / Host 回传的任务名 | `planner` / `replyer` | 0（观察值无耗时） | `core/llm_service.py:201-213`，调用点 `plugin.py:1286`、`:1354` |
 | 自定义联网搜索模型调用 | `search_api_model` | 操作名（operation） | Provider 类型 | 实测耗时 | `information/search_service.py:244-249` |
 
 聚合读出的唯一入口是 `usage_summary(since)`，按 `(source, task_name)` 分组统计调用数、成功数、
 Token 与平均延迟（`core/storage.py:2054-2063`），消费方是管理命令和 WebUI
-（`management/admin_service.py:114`、`plugin.py:2114`、`:2554` 起；WebUI 逐日差分算法见
-`plugin.py:2560-2568` 注释）。
+（`management/admin_service.py:114`、`plugin.py:2159`、`:2554` 起；WebUI 逐日差分算法见
+`plugin.py:2605-2613` 注释）。
 
 坑：Token 统计写入失败**绝不干扰主链**——`_record`/`record_observed` 内部 try/except 后只记
 debug（`core/llm_service.py:137-138`、`core/llm_service.py:211-213`）；`llm.generate` 返回非 dict
@@ -1252,7 +1252,7 @@ debug（`core/llm_service.py:137-138`、`core/llm_service.py:211-213`）；`llm.
 - `reserve_date_trigger`（`core/storage.py:2258`）、`update_news_summary`（`core/storage.py:2336`）、
   `search_success_count`（`core/storage.py:2522`）、`search_history_count`（`core/storage.py:2504`）
   均无非测试调用方，疑为死代码，未从 git 历史确认是否有过调用方。
-- WebUI 对 `usage_summary` / `recent_state_snapshots` 的渲染细节（`plugin.py:2275`、`:2554`
+- WebUI 对 `usage_summary` / `recent_state_snapshots` 的渲染细节（`plugin.py:2320`、`:2554`
   之后）属于管理章节范围（§9.4），本章只确认到读取点。
 - 维护循环其余五类（bedtime/proactive/daily-generation 等）与 `_maintenance_tick` 内部的日程
   细化、日记、关系结算顺序已读到调用点，但各循环的完整业务语义属于对应模块章节（§11.1）。
@@ -1275,15 +1275,15 @@ debug（`core/llm_service.py:137-138`、`core/llm_service.py:211-213`）；`llm.
 | `BedtimeManager` | `life/bedtime.py` | 维护 `sleep_defer_until`（何时真正入睡）与叫醒后回睡 |
 | `RestGate` | `life/rest_gate.py` | 休息期间的被动回复判醒，建立"待醒"候选 |
 
-主循环里的串行顺序是（`plugin.py:468` `_maintenance_tick`）：
+主循环里的串行顺序是（`plugin.py:470` `_maintenance_tick`）：
 
-1. `ensure_day` 生成本日框架 → `expand_due` 细化临近场景（`plugin.py:476-479`）；
-2. `BedtimeManager.tick` **先于**相位推进（`plugin.py:483`，注释在 `plugin.py:482`：
+1. `ensure_day` 生成本日框架 → `expand_due` 细化临近场景（`plugin.py:478-481`）；
+2. `BedtimeManager.tick` **先于**相位推进（`plugin.py:485`，注释在 `plugin.py:484`：
    静默刚达标时先更新 defer/回睡，`advance` 才不会按旧值提前睡过去）；
-3. `state_timeline` 按日程边界切出离线 span，`advance_timeline` 逐段推进（`plugin.py:485-486`）；
-4. 落一小时状态快照（`plugin.py:488`）。
+3. `state_timeline` 按日程边界切出离线 span，`advance_timeline` 逐段推进（`plugin.py:487-488`）；
+4. 落一小时状态快照（`plugin.py:490`）。
 
-另有独立的 60 秒睡前循环调用 `BedtimeManager.tick`（`plugin.py:425-426`，
+另有独立的 60 秒睡前循环调用 `BedtimeManager.tick`（`plugin.py:427-428`，
 粒度常量 `BEDTIME_LOOP_SECONDS=60`，`life/bedtime.py:21`）。
 
 关键状态字段分两张表：`global_state` 存数值（energy/hunger/mood_valence/mood_arousal/
@@ -1364,7 +1364,7 @@ last_event/sleep_defer_until，`core/storage.py:170`）。
   所以它**不是纯函数**；测试里连续调用同一 `now` 会因 `elapsed=0` 得到看似"没变化"的结果，
   这是预期行为而非 bug。
 - 段类型从 `segment["kind"]` 来，`segment=None` 时按 `leisure`（`life/life_state.py:84`）。
-  `advance_timeline` 的收尾 advance 传的是 `context["current"]`（`plugin.py:486`），
+  `advance_timeline` 的收尾 advance 传的是 `context["current"]`（`plugin.py:488`），
   若当前时刻不在任何框架节点内（框架留空档），`current` 为 None，睡眠段会被当 leisure 算消耗。
 - 醒来判定只看 `started_at`，而 `started_at` 会被 `mark_resleep` 重置
   （`life/life_state.py:274`）——叫醒后回睡再醒，`sleep_duration` 只算回睡那一段。
@@ -1401,7 +1401,7 @@ last_event/sleep_defer_until，`core/storage.py:170`）。
 - 截断只发生在 `timeline` 非空且 `last_updated_at` 早于首个 span 时；如果昨天有日程、
   今天没有，`timeline` 仍非空（`state_timeline` 对缺失日用本地 fallback 兜底，
   `life/schedule_service.py:328`），截断逻辑照常工作。
-- `simulation_start=max(last_updated, now-72h)`（`plugin.py:481`）与 `advance` 内的
+- `simulation_start=max(last_updated, now-72h)`（`plugin.py:483`）与 `advance` 内的
   72 小时钳制是双保险，改任一处时想清楚另一处。
 
 ### 4.4 做梦概率门与 `generate_dream`
@@ -1570,7 +1570,7 @@ defer = max(floor, latest + BEDTIME_SILENCE_MINUTES*60)
 
 与 `advance` 的配合：defer 未到 → `effective_sleep=False`（`life/life_state.py:88`、
 `life/life_state.py:94`），夜窗前对话未完时她继续回复；`RestGate` 也对 defer 期消息
-直接放行（`life/rest_gate.py:161`，reason `睡前对话未完，暂缓入睡`）。
+直接放行（`life/rest_gate.py:184`，reason `睡前对话未完，暂缓入睡`）。
 每条新消息都把 defer 推后 10 分钟（v1.14.6 需求，docstring `life/bedtime.py:6-8`）。
 **为什么睡眠期/宽限期一律写 0**：被闸门拦下的消息同样会更新 `last_user_message_at`，
 若不排除，入睡点会被这些她根本看不到的消息反复推开（注释 `life/bedtime.py:74-75`）。
@@ -1584,7 +1584,7 @@ defer = max(floor, latest + BEDTIME_SILENCE_MINUTES*60)
 
 `approaching(now)`（`life/bedtime.py:100`）：是否在夜窗内（起=night_start、止=night_end，
 不额外提前，`life/bedtime.py:105-106`），供 Replyer 注入收尾/晚安提示
-（调用点 `plugin.py:1143`）。
+（调用点 `plugin.py:1145`）。
 
 容易踩的坑：
 
@@ -1598,38 +1598,38 @@ defer = max(floor, latest + BEDTIME_SILENCE_MINUTES*60)
 
 ### 4.7 休息闸门（`RestGate`）的两条触发路径与全部分支
 
-`RestGate.decide` 是私聊消息的判醒入口（调用点 `plugin.py:1093`，在防抖、互动记录、
-连续性/记忆观察之后，`plugin.py:1061-1093`）。
+`RestGate.decide` 是私聊消息的判醒入口（调用点 `plugin.py:1095`，在防抖、互动记录、
+连续性/记忆观察之后，`plugin.py:1063-1095`）。
 
-**闸门是否生效 = 时间窗 OR 日程类型**（`life/rest_gate.py:143-152`）：
+**闸门是否生效 = 时间窗优先，日程类型兜底**（`life/rest_gate.py:161-175`，v1.23.3 起）：
 
 - 夜窗 `night_start-night_end`（默认 22:30-08:00）或午休窗 `nap_start-nap_end`
   （默认 12:00-14:30）内**一定**生效——避免默认框架里 leisure/meal 段把闸门静默收窄
-  （注释 `life/rest_gate.py:144-146`）；
-- `gate_segment_types`（默认 `["sleep","nap"]`）列出的段型在**任意时间**也生效。
-  默认含 sleep/nap 意味着日程一进睡眠/午休段闸门就生效，**可能早于夜窗开始**
-  （夜窗设 00:00 而日程 22:30 就寝，则 22:30 起屏蔽，配置文案明示
-  `config.py:806`）；只想按夜窗控制就清空该列表；加入 `rest` 后普通休息段也可能不回复。
+  （注释 `life/rest_gate.py:162-164`）；
+- `gate_segment_types`（默认 `["sleep","nap"]`）是**时间窗未配置（起止相同）时的兜底**；
+  `rest` 等无对应时间窗的类型列出后任意时间生效。**时间窗优先（v1.23.3）**：配了起止不同的
+  夜窗后，日程里的睡眠段不会让闸门提前生效（夜窗设 00:00 而日程 22:30 就寝，则 22:30
+  照常回复——用户实测踩坑后修复）；只想完全按时间窗控制就清空该列表；加入 `rest` 后普通休息段也可能不回复。
 - 两条都不命中 → `(True, "outside_gate_window")` 直接放行且不打日志
-  （`life/rest_gate.py:152`、`life/rest_gate.py:131`）。
+  （`life/rest_gate.py:175`、`life/rest_gate.py:149`）。
 
-**私聊 `_decide` 全部分支**（`life/rest_gate.py:137`，按判定顺序）：
+**私聊 `_decide` 全部分支**（`life/rest_gate.py:155`，按判定顺序）：
 
 | 顺序 | 条件 | 结果 | 行号 |
 | --- | --- | --- | --- |
-| 0 | 窗口起止相同（退化窗） | 先打告警（每小时最多一条），不改变判定 | `life/rest_gate.py:140`、`life/rest_gate.py:56-66` |
-| 1 | `rest_gate.enabled` 为假 | 放行 `disabled` | `life/rest_gate.py:141` |
-| 2 | 文本以 `/` 开头 | 放行 `command`（命令不判醒） | `life/rest_gate.py:142` |
-| 3 | 非夜窗/午休窗且段型不匹配 | 放行 `outside_gate_window` | `life/rest_gate.py:147-152` |
-| 4 | `boundary` 判为勿扰 | **阻断** `BLOCK_REASON`（用户明确希望继续休息），且先于一切窗内分支 | `life/rest_gate.py:156-157`、`life/rest_gate.py:9` |
-| 5 | `sleep_defer_until` 未到 | 放行 `睡前对话未完，暂缓入睡` | `life/rest_gate.py:161` |
-| 6 | `awake_grace_until` 未到 | 放行 `awake_grace` | `life/rest_gate.py:162` |
-| 7 | 无文字且 media 含 image/emoji/gif | 阻断 `夜间媒体消息，不叫醒`（不走概率与模型） | `life/rest_gate.py:164-165` |
-| 8 | `boundary` 判为 wake | 建候选 + 放行，reason 见下 | `life/rest_gate.py:166-168` |
-| 9 | `mode=="llm"` 且任务可用 | LLM 打分判定（见下） | `life/rest_gate.py:172-195` |
-| 10 | `mode=="llm"` 但任务不可用 | 告警并**本轮回退概率模式**（不整夜 fail-closed） | `life/rest_gate.py:169-171` |
-| 11 | 概率模式（或回退后） | `random.random()<=wake_probability`（默认 0.18） | `life/rest_gate.py:197`、`config.py:778` |
-| 12 | 以上任一"允许"路径 | 建待醒候选后放行 | `life/rest_gate.py:198` |
+| 0 | 窗口起止相同（退化窗） | 先打告警（每小时最多一条），不改变判定 | `life/rest_gate.py:158`、`life/rest_gate.py:56-66` |
+| 1 | `rest_gate.enabled` 为假 | 放行 `disabled` | `life/rest_gate.py:159` |
+| 2 | 文本以 `/` 开头 | 放行 `command`（命令不判醒） | `life/rest_gate.py:160` |
+| 3 | 非夜窗/午休窗且段型路径不生效（未列入，或对应时间窗已配置） | 放行 `outside_gate_window` | `life/rest_gate.py:165-175` |
+| 4 | `boundary` 判为勿扰 | **阻断** `BLOCK_REASON`（用户明确希望继续休息），且先于一切窗内分支 | `life/rest_gate.py:179-180`、`life/rest_gate.py:9` |
+| 5 | `sleep_defer_until` 未到 | 放行 `睡前对话未完，暂缓入睡` | `life/rest_gate.py:184` |
+| 6 | `awake_grace_until` 未到 | 放行 `awake_grace` | `life/rest_gate.py:185` |
+| 7 | 无文字且 media 含 image/emoji/gif | 阻断 `夜间媒体消息，不叫醒`（不走概率与模型） | `life/rest_gate.py:187-188` |
+| 8 | `boundary` 判为 wake | 建候选 + 放行，reason 见下 | `life/rest_gate.py:189-191` |
+| 9 | `mode=="llm"` 且任务可用 | LLM 打分判定（见下） | `life/rest_gate.py:195-218` |
+| 10 | `mode=="llm"` 但任务不可用 | 告警并**本轮回退概率模式**（不整夜 fail-closed） | `life/rest_gate.py:192-194` |
+| 11 | 概率模式（或回退后） | `random.random()<=wake_probability`（默认 0.18） | `life/rest_gate.py:220`、`config.py:778` |
+| 12 | 以上任一"允许"路径 | 建待醒候选后放行 | `life/rest_gate.py:221` |
 
 **`boundary` 三分类**（`life/rest_gate.py:29`，输入先去空白转小写）：
 
@@ -1642,7 +1642,7 @@ defer = max(floor, latest + BEDTIME_SILENCE_MINUTES*60)
    → `wake`，reason `明确叫醒、紧急或安全需要`（`life/rest_gate.py:38-39`）；
 4. 其余 → `judge`（`life/rest_gate.py:40`）。
 
-**LLM 模式判定**（`life/rest_gate.py:172-195`）：模型返回
+**LLM 模式判定**（`life/rest_gate.py:195-218`）：模型返回
 `{importance, explicit_wake, emotional_need, safety_risk, do_not_disturb, score,
 should_reply, reason}`，各分数钳 0-100。判定优先级：
 
@@ -1650,17 +1650,17 @@ should_reply, reason}`，各分数钳 0-100。判定优先级：
 - `max(explicit_wake, safety_risk) >= llm_threshold` → 放行；
 - 否则 `should_reply and score >= llm_threshold` → 放行，否则继续睡；
 - 模型失败时保持睡眠（fallback 传 `{}`，所有 value() 归 0，注释
-  `life/rest_gate.py:173`）。
+  `life/rest_gate.py:196`）。
 
-reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放行留痕
-（`disabled`/`command`/`outside_gate_window` 除外，`life/rest_gate.py:131-134`）——
+reason 字符串带全部分数（`life/rest_gate.py:217`），`decide` 对放行留痕
+（`disabled`/`command`/`outside_gate_window` 除外，`life/rest_gate.py:149-152`）——
 否则"夜里还在回消息"无法区分是 defer/宽限/唤醒词还是概率放行（注释
-`life/rest_gate.py:129-130`）。
+`life/rest_gate.py:147-148`）。
 
-**被阻断消息的后续**（`plugin.py:1094-1104`）：非 `BLOCK_REASON` 的阻断写一次性
+**被阻断消息的后续**（`plugin.py:1096-1106`）：非 `BLOCK_REASON` 的阻断写一次性
 `rest_backlogs`（次日可能主动提起），`BLOCK_REASON` **不进 backlog**——避免次日
-主动提起用户的勿扰表达（`plugin.py:1096-1097`，常量用途注释 `life/rest_gate.py:8-9`）。
-注意被阻断消息**仍然已经**写入互动历史与记忆观察（`plugin.py:1080-1090` 先于闸门），
+主动提起用户的勿扰表达（`plugin.py:1098-1099`，常量用途注释 `life/rest_gate.py:8-9`）。
+注意被阻断消息**仍然已经**写入互动历史与记忆观察（`plugin.py:1082-1092` 先于闸门），
 只是不进 Planner/Replyer。
 
 **退化窗告警。** `night_start==night_end`（或群窗起止相同且群闸门开启）时该窗口永假，
@@ -1668,14 +1668,15 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 `_warn_degenerate_window` 每小时最多告警一次（实例属性 `_window_warned_at` 节流，
 `life/rest_gate.py:56-66`），并提示"如需整夜生效请把结束时间设为起床时间（如 08:00）"。
 
-**群聊闸门 `decide_group`**（`life/rest_gate.py:92`，与私聊完全独立的轻量版）：
+**群聊闸门 `decide_group`**（`life/rest_gate.py:105`，与私聊完全独立的轻量版）：
 总闸 `group_enabled` → 分群开关 → 时间窗或段型 → 强制词放行/勿扰词阻断/其余静默
-（`life/rest_gate.py:101-114`）。**不放行概率、不建待醒候选、不写积压**，每条群消息
-独立判定，被阻断消息不进入主程序（注释 `life/rest_gate.py:95-97`）。
+（`life/rest_gate.py:115-132`）。**不放行概率、不建待醒候选、不写积压**，每条群消息
+独立判定，被阻断消息不进入主程序（注释 `life/rest_gate.py:108-110`）。
 分群开关 `group_gate_enabled_for`：`group_mode=="all"`（默认）对所有群生效；
 `"selected"` 只对社交白名单内且打开「夜间静音」的群生效（`life/rest_gate.py:76-90`）。
 群窗/群段型/群强制词都是独立配置（`config.py:847-879`），其中
-`group_gate_segment_types` 是 `list[str]` 而非 Literal，可配任意段型
+`group_gate_segment_types` v1.23.3 起为 `list[Literal[...]]` 纯选择（8 个段型），
+与私聊同构的时间窗优先：群时间窗配了起止时间后，窗外睡眠/午休段不静默
 （`config.py:863`，UI 枚举 `config.py:870-872`）。
 
 容易踩的坑：
@@ -1686,10 +1687,10 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
   判定顺序见 `life/rest_gate.py:32-35` 与 `life/rest_gate.py:36`，词表默认值
   `config.py:812`。
 - 段型触发依赖 `context["current"]` 非空；框架有空档时 `current=None`，
-  `segment_kind=""`，只剩时间窗一条路（`life/rest_gate.py:150-151`）。
+  `segment_kind=""`，只剩时间窗一条路（`life/rest_gate.py:168-169`）。
 - LLM 判为 do_not_disturb 而阻断的消息，reason 是 `llm:...` 而非 `BLOCK_REASON`，
-  **会进 backlog**——只有正则勿扰词才豁免（`plugin.py:1096`）。
-- 概率分支用 `<=`（`life/rest_gate.py:197`）而做梦门用 `<`
+  **会进 backlog**——只有正则勿扰词才豁免（`plugin.py:1098`）。
+- 概率分支用 `<=`（`life/rest_gate.py:220`）而做梦门用 `<`
   （`life/life_state.py:205`），两者对 p=0/1 都有短路保护，不一致只是历史写法，
   没有实际差异。
 
@@ -1699,13 +1700,13 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 
 1. **第一段（决策留痕）**：`_decide` 允许时 `_candidate` 往 `wake_candidates` 写一行
    （`session_id, user_id, message_id, reason, created_at, expires_at`，
-   `life/rest_gate.py:116-122`，SQL `core/storage.py:1213`）。生命周期
+   `life/rest_gate.py:134-140`，SQL `core/storage.py:1213`）。生命周期
    `max(900, turn_expire_seconds*3)` 秒——要覆盖 planner+replyer 两级模型与发送排队，
    默认 900s（`turn_expire_seconds` 默认 120，`config.py:969`；注释
-   `life/rest_gate.py:118`）。同一 session 是 `INSERT OR REPLACE`，新候选覆盖旧的。
+   `life/rest_gate.py:136`）。同一 session 是 `INSERT OR REPLACE`，新候选覆盖旧的。
 2. **第二段（提交）**：平台确认发送成功后调 `commit_for_send(session, now, message_id)`
    → `pop_wake_candidate`（要求 message_id 匹配且未过期，`core/storage.py:1222`） →
-   `mark_woken`（`life/rest_gate.py:203-205`）。
+   `mark_woken`（`life/rest_gate.py:226-228`）。
 
 `mark_woken`（`life/life_state.py:261`）做的事：相位 `woken`、
 `awake_grace_until = now + awake_grace_minutes*60`（默认 30 分钟，`config.py:794`）、
@@ -1714,12 +1715,12 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 **为什么两段**：模型/概率决定回复 ≠ 她真的说了话。发送可能失败、可能被撤回，
 若在决策点就叫醒，会出现"她没说话却醒了"的幽灵状态；反过来发送成功但候选已被清
 （或过期）时 `commit_for_send` 返回 False，状态不变——失败路径由调用方
-`clear_wake_candidate` 显式释放（`plugin.py:1594`、`plugin.py:1607`）。
+`clear_wake_candidate` 显式释放（`plugin.py:1596`、`plugin.py:1609`）。
 调用点只在**普通被动回复**成功后提交；主动/转述任务不改变休息状态
-（`plugin.py:1616-1620`，条件 `not active_attribution`；无确认锚点的路径在
-`plugin.py:1588-1591`，发送失败清候选在 `plugin.py:1593-1594`）。
+（`plugin.py:1618-1622`，条件 `not active_attribution`；无确认锚点的路径在
+`plugin.py:1590-1593`，发送失败清候选在 `plugin.py:1595-1596`）。
 
-与相位机的配合：`mark_woken` 后宽限内消息直接放行（`life/rest_gate.py:162`），
+与相位机的配合：`mark_woken` 后宽限内消息直接放行（`life/rest_gate.py:185`），
 宽限内不会重新入睡（`life/life_state.py:86`、`life/life_state.py:94`）；
 宽限到期后若 `BedtimeManager` 先跑且仍在休息窗 → `mark_resleep` 回睡
 （`life/bedtime.py:98`），否则 `advance` 自然转 `awake`（`life/life_state.py:121-124`）。
@@ -1729,7 +1730,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 - `pop_wake_candidate` 在 message_id 不匹配时返回 `{}` 并顺手清掉本 session 的过期行
   （`core/storage.py:1235-1238`）——提交时传错 message_id 会静默不叫醒。
 - `commit_for_send` 是幂等终点：候选被消费后不存在，重复调用返回 False
-  （`life/rest_gate.py:204`），平台重投不会二次扣能量。
+  （`life/rest_gate.py:227`），平台重投不会二次扣能量。
 - `mark_woken` 直接扣 3 点精力且不看当前是否已在睡——测试替身
   `tests/support.py:85-87` 是空实现，别以它推断真实行为。
 
@@ -1742,7 +1743,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 | `rest_gate.wake_probability` | `0.18` | 概率模式普通消息叫醒概率 | `config.py:778` |
 | `rest_gate.llm_threshold` | `70` | LLM 分数阈值 | `config.py:786` |
 | `rest_gate.awake_grace_minutes` | `30` | 叫醒宽限；也决定回睡计时起点 | `config.py:794` |
-| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 任意时间也生效的段型 | `config.py:802` |
+| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 窗口未配置时兜底的段型 + 无窗口类型开关 | `config.py:802` |
 | `rest_gate.force_wake_terms` | 见上 | 强制唤醒词表 | `config.py:811` |
 | `rest_gate.night_start/night_end` | `22:30`/`08:00` | 夜窗，支持跨午夜 | `config.py:818`、`config.py:822` |
 | `rest_gate.nap_start/nap_end` | `12:00`/`14:30` | 午休窗 | `config.py:826`、`config.py:830` |
@@ -1768,7 +1769,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
   规则二次过滤）不在本章四个文件内，未追踪。
 - `state_timeline` 中 `completion` 的 `framework_id=""` 分支（无场景也发 deltas）与
   `advance_timeline` 的幂等依赖"时间窗只前进"这一隐含前提；若存在重入/并发调用
-  `_maintenance_tick` 的路径，未确认是否完全串行（`plugin.py:471` 有
+  `_maintenance_tick` 的路径，未确认是否完全串行（`plugin.py:473` 有
   `_maintenance_lock`，但锁外调用方未逐一排查）。
 - 做梦门在"午休被叫醒后回睡超过 3 小时"场景下的绕过效应（见 §4.4 坑位）是代码路径
   推断，未找到对应测试或实际复现。
@@ -1786,33 +1787,33 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 
 | 阶段 | 入口 | 关键产出 | 中止后果 |
 |---|---|---|---|
-| ① 收口与路由 | `plugin.py:936` `on_receive` | 识别撤回通知 / 手滑命令 / 群私聊归属 | 返回 `abort`，Host 不再把消息送进主程序 |
+| ① 收口与路由 | `plugin.py:938` `on_receive` | 识别撤回通知 / 手滑命令 / 群私聊归属 | 返回 `abort`，Host 不再把消息送进主程序 |
 | ② 防抖合并 | `messaging/message_pipeline.py:292` `MessageDebouncer.collect` | 把连续补话合并成一条 `merged` 消息 | 输家返回 `superseded`，调用方必须 `abort` |
-| ③ 群轮次 / 私聊运行态 | `plugin.py:974` `_process_group_message`、`plugin.py:1043` `_process_private_message` | 群轮次表 `_group_turns` / 私聊 `_session_runtime` | 未登记 → Replyer 拿不到归因，输出被静默 |
-| ④ 休息闸门 | `life/rest_gate.py:124` `RestGate.decide` / `life/rest_gate.py:92` `decide_group` | 放行 / 阻断 / 建「待醒」候选 | 阻断 → 只写 backlog，不产生 Planner/Replyer 请求 |
-| ⑤ Planner + Replyer | `plugin.py:1237` `on_planner`、`plugin.py:1288` `on_replyer`、`plugin.py:1323` `on_replyer_after` | 注入背景、抑制输出、建立发送确认记录 | 抑制 → `response=""`，Host 不发送 |
-| ⑥ 发送确认 | `plugin.py:1447` `on_send_before`、`plugin.py:1539` `on_send_after` | 撤回墓碑复核、预留/释放、醒来与主动额度结算 | `abort` → 平台不发出；`sent=False` → 释放全部预留 |
+| ③ 群轮次 / 私聊运行态 | `plugin.py:976` `_process_group_message`、`plugin.py:1045` `_process_private_message` | 群轮次表 `_group_turns` / 私聊 `_session_runtime` | 未登记 → Replyer 拿不到归因，输出被静默 |
+| ④ 休息闸门 | `life/rest_gate.py:142` `RestGate.decide` / `life/rest_gate.py:105` `decide_group` | 放行 / 阻断 / 建「待醒」候选 | 阻断 → 只写 backlog，不产生 Planner/Replyer 请求 |
+| ⑤ Planner + Replyer | `plugin.py:1239` `on_planner`、`plugin.py:1290` `on_replyer`、`plugin.py:1325` `on_replyer_after` | 注入背景、抑制输出、建立发送确认记录 | 抑制 → `response=""`，Host 不发送 |
+| ⑥ 发送确认 | `plugin.py:1449` `on_send_before`、`plugin.py:1541` `on_send_after` | 撤回墓碑复核、预留/释放、醒来与主动额度结算 | `abort` → 平台不发出；`sent=False` → 释放全部预留 |
 
-**为什么这样设计**：这条链上任何一环都可能被「用户撤回」「新消息到达」「热重载/热禁用」「Host 任务迟到」打断。插件把「是否允许发送」拆成三道相互独立的防线——Replyer 输出收口（⑤）、发送前复核（⑥ 前半）、平台结果结算（⑥ 后半）——并且每道防线都同时查内存态（`_reply_confirmations`、`_active_tasks`）和持久态（`recall_events` / `reply_turns` 表），这样热重载丢掉内存后仍然拦得住（`plugin.py:844-857` `_is_recalled` 的注释即为此意）。
+**为什么这样设计**：这条链上任何一环都可能被「用户撤回」「新消息到达」「热重载/热禁用」「Host 任务迟到」打断。插件把「是否允许发送」拆成三道相互独立的防线——Replyer 输出收口（⑤）、发送前复核（⑥ 前半）、平台结果结算（⑥ 后半）——并且每道防线都同时查内存态（`_reply_confirmations`、`_active_tasks`）和持久态（`recall_events` / `reply_turns` 表），这样热重载丢掉内存后仍然拦得住（`plugin.py:846-859` `_is_recalled` 的注释即为此意）。
 
-**容易踩的坑**：三道防线都是「尽力而为」而非「保证拦住」。`_is_recalled` 在存储查询抛异常时**失败开放**（`plugin.py:852-856`：捕获异常后 `return False`，即视为未撤回），因为 DB 故障时把用户消息全部静默的代价更高。读到 `return False` 不要以为是 bug。
+**容易踩的坑**：三道防线都是「尽力而为」而非「保证拦住」。`_is_recalled` 在存储查询抛异常时**失败开放**（`plugin.py:854-858`：捕获异常后 `return False`，即视为未撤回），因为 DB 故障时把用户消息全部静默的代价更高。读到 `return False` 不要以为是 bug。
 
 ### 5.2 入口 `on_receive`：收口与路由
 
-`plugin.py:936-972`。按顺序做六件事：
+`plugin.py:938-974`。按顺序做六件事：
 
-1. **撤回通知优先**：`recall_notice(message)`（`messaging/adapter_compat.py:32`）一旦判定为撤回通知且 `plugin.enabled`，就走 `_handle_recall` 并**直接 `abort`**（`plugin.py:944-950`）。注意通知不进入 Maisaka，总开关只决定是否建墓碑和取消派生任务。
-2. **停机/热重载/未就绪** → `continue`（`plugin.py:951`）。`_ready` 要求 18 个服务全部装配完成（`plugin.py:221-226`），少一个就走旁路，绝不抛异常。
-3. **其它 `is_notify`** → `continue`（`plugin.py:952`）。
-4. **手滑命令兜底**：`_is_unmatched_mai_command`（`plugin.py:925-934`）命中时直接发指令菜单并 `abort`（`plugin.py:954-965`），避免「/麦麦状态 」这种带尾空格的输入落进 AI 闲聊。发送目标完全从消息身份派生（Hook 入参里只有 `message`）。
-5. **撤回入站登记**：`self._recall.note_inbound(message)` + `register_turn(message)`（`plugin.py:967-969`）。
+1. **撤回通知优先**：`recall_notice(message)`（`messaging/adapter_compat.py:32`）一旦判定为撤回通知且 `plugin.enabled`，就走 `_handle_recall` 并**直接 `abort`**（`plugin.py:946-952`）。注意通知不进入 Maisaka，总开关只决定是否建墓碑和取消派生任务。
+2. **停机/热重载/未就绪** → `continue`（`plugin.py:953`）。`_ready` 要求 18 个服务全部装配完成（`plugin.py:221-226`），少一个就走旁路，绝不抛异常。
+3. **其它 `is_notify`** → `continue`（`plugin.py:954`）。
+4. **手滑命令兜底**：`_is_unmatched_mai_command`（`plugin.py:927-936`）命中时直接发指令菜单并 `abort`（`plugin.py:956-967`），避免「/麦麦状态 」这种带尾空格的输入落进 AI 闲聊。发送目标完全从消息身份派生（Hook 入参里只有 `message`）。
+5. **撤回入站登记**：`self._recall.note_inbound(message)` + `register_turn(message)`（`plugin.py:969-971`）。
 6. **分流**：`message_identity` 的第四个返回值 `private`（`messaging/message_pipeline.py:96-103`，判据是 `group_info.group_id` 为空）决定走群聊还是私聊管线。
 
 `is_command` 的判据是 `message.get("is_command")` **或** `direct_text(...).lstrip().startswith("/")`（`messaging/message_pipeline.py:106-107`）。
 
 **为什么这样设计**：命令路径完全不进防抖、不进闸门、不写运行态——命令是确定性的，不该被 1.2 秒静默窗拖延，也不该被夜间闸门拦掉。
 
-**容易踩的坑**：`on_receive` 的 `HookHandler` 是 `mode=BLOCKING, order=EARLY, timeout_ms=30000`（`plugin.py:936`）。整条私聊管线（含防抖等待、闸门 LLM 判醒、生活分享判定的 3.2s 超时）都在这 30 秒预算内。`_detect_moment_signal` 的 3.2s 硬超时（`plugin.py:592-596`）就是为这条预算服务的（注释见 `plugin.py:572-573`）。新增任何 await 都要先算进这 30 秒。
+**容易踩的坑**：`on_receive` 的 `HookHandler` 是 `mode=BLOCKING, order=EARLY, timeout_ms=30000`（`plugin.py:938`）。整条私聊管线（含防抖等待、闸门 LLM 判醒、生活分享判定的 3.2s 超时）都在这 30 秒预算内。`_detect_moment_signal` 的 3.2s 硬超时（`plugin.py:594-598`）就是为这条预算服务的（注释见 `plugin.py:574-575`）。新增任何 await 都要先算进这 30 秒。
 
 ### 5.3 防抖收口 `MessageDebouncer`
 
@@ -1881,7 +1882,7 @@ t2: True merged:2
 
 **为什么这样设计**：`asyncio.Event` 没有身份概念，光 `event.wait()` 无法区分「窗口到期」和「被新消息顶替」。用「替换事件对象 + generation 凭据」两个手段，等待方才能在锁内做出正确判断。
 
-**容易踩的坑**：`collect` 返回 `allowed=False` 时**调用方必须 `abort`**，否则同一条消息会被两个 Hook 调用各自处理一遍，产生两条重复回复。`plugin.py:991`、`plugin.py:1065-1066` 都遵守了这一点。
+**容易踩的坑**：`collect` 返回 `allowed=False` 时**调用方必须 `abort`**，否则同一条消息会被两个 Hook 调用各自处理一遍，产生两条重复回复。`plugin.py:993`、`plugin.py:1067-1068` 都遵守了这一点。
 
 #### 5.3.6 合并结果 `_merge`
 
@@ -1919,87 +1920,87 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 
 #### 5.3.8 关闭
 
-`close()`（`messaging/message_pipeline.py:148-157`）置 `_closed`、取消所有定时器、`event.set()` 唤醒所有等待方，让在飞的 `collect` 带着已收集内容结算。`on_unload` 第一步就调它（`plugin.py:306`）。
+`close()`（`messaging/message_pipeline.py:148-157`）置 `_closed`、取消所有定时器、`event.set()` 唤醒所有等待方，让在飞的 `collect` 带着已收集内容结算。`on_unload` 第一步就调它（`plugin.py:308`）。
 
 #### 5.3.9 诊断入口
 
-`active_bursts`（`messaging/message_pipeline.py:404-406`）被 `/麦麦状态` 暴露（`plugin.py:2075`：「消息收口：私聊 开启 / 群聊 关闭（活跃 N）」）。排查「消息像是没进来」时先看这个数字是否卡住不归零。
+`active_bursts`（`messaging/message_pipeline.py:404-406`）被 `/麦麦状态` 暴露（`plugin.py:2120`：「消息收口：私聊 开启 / 群聊 关闭（活跃 N）」）。排查「消息像是没进来」时先看这个数字是否卡住不归零。
 
 ### 5.4 群聊管线与群轮次
 
-`plugin.py:974-1041`。顺序：
+`plugin.py:976-1043`。顺序：
 
-1. 登记 `_group_sessions`、`upsert_group_directory`（`plugin.py:977-980`）
-2. `not uid or is_command(message)` → 撤回检查后 `abort`/`continue`（`plugin.py:981-982`）。注意这里判的是**原始消息**，早于合并。
-3. 可选防抖：`collect(message, media_hint=media_types(message))`（`plugin.py:987`）。异常时**失败开放**：`allowed=True; merged=message; reason="failed_open"`（`plugin.py:988-990`）。
-4. 若停机/热重载/热禁用发生在防抖等待期间：保留合并结果但不记录不阻断（`plugin.py:992-994`）。
-5. 重新从 `merged` 取身份与 `source_ids`，再次 `register_turn`（`plugin.py:995-998`）。
-6. 撤回检查 → 取消派生任务、通知群观察者、`abort`（`plugin.py:999-1004`）。
-7. **群休息闸门**（`plugin.py:1010-1020`）：`decide_group(direct_text(merged), now, group_id, group_segment)`，阻断则 `abort`。注释说明被阻断的消息不进主程序，因此不产生 Planner/Replyer/VLM 请求，也不留积压与候选。
-8. **群轮次登记**（`plugin.py:1021-1032`，仅当 `debounce.group_enabled`）：
-   - `turn_scope = _group_scope(merged)` = `group:{platform}:{group_id}:{user_id}`（`plugin.py:800-804`）
+1. 登记 `_group_sessions`、`upsert_group_directory`（`plugin.py:979-982`）
+2. `not uid or is_command(message)` → 撤回检查后 `abort`/`continue`（`plugin.py:983-984`）。注意这里判的是**原始消息**，早于合并。
+3. 可选防抖：`collect(message, media_hint=media_types(message))`（`plugin.py:989`）。异常时**失败开放**：`allowed=True; merged=message; reason="failed_open"`（`plugin.py:990-992`）。
+4. 若停机/热重载/热禁用发生在防抖等待期间：保留合并结果但不记录不阻断（`plugin.py:994-996`）。
+5. 重新从 `merged` 取身份与 `source_ids`，再次 `register_turn`（`plugin.py:997-1000`）。
+6. 撤回检查 → 取消派生任务、通知群观察者、`abort`（`plugin.py:1001-1006`）。
+7. **群休息闸门**（`plugin.py:1012-1022`）：`decide_group(direct_text(merged), now, group_id, group_segment)`，阻断则 `abort`。注释说明被阻断的消息不进主程序，因此不产生 Planner/Replyer/VLM 请求，也不留积压与候选。
+8. **群轮次登记**（`plugin.py:1023-1034`，仅当 `debounce.group_enabled`）：
+   - `turn_scope = _group_scope(merged)` = `group:{platform}:{group_id}:{user_id}`（`plugin.py:802-806`）
    - `_cancel_group_confirmations(turn_scope)` 取消同群同发送者的旧轮次
    - 清理 `turn_expire_seconds`（下限 30s）之前的旧轮次
    - `_group_turn_generation += 1`，写入 `_group_turns[(session, mid)]`
-9. 群观察者后台任务（`plugin.py:1033-1038`），用 `message_keys` 绑定来源消息以支持撤回取消。
+9. 群观察者后台任务（`plugin.py:1035-1040`），用 `message_keys` 绑定来源消息以支持撤回取消。
 10. `kwargs["message"] = merged`，返回 `continue` + `modified_kwargs`。
 
-**为什么这样设计**：群聊不注入任何私聊关系或生活隐私（`plugin.py:976` docstring）。`_group_turns` 是「哪条群消息对应哪一轮回复」的唯一内存索引，Replyer 与发送 Hook 都靠 `_group_turn_for`（`plugin.py:806-812`）反查——先按 `(session, anchor)` 直接命中，再按 `anchor ∈ source_message_ids` 反查。
+**为什么这样设计**：群聊不注入任何私聊关系或生活隐私（`plugin.py:978` docstring）。`_group_turns` 是「哪条群消息对应哪一轮回复」的唯一内存索引，Replyer 与发送 Hook 都靠 `_group_turn_for`（`plugin.py:808-814`）反查——先按 `(session, anchor)` 直接命中，再按 `anchor ∈ source_message_ids` 反查。
 
 **容易踩的坑**：
 
-- `_group_scope` 在 `group_id` 或 `user_id` 缺失时返回**空串**（`plugin.py:804`），此时 `_cancel_group_confirmations("")` 直接 no-op（`plugin.py:790`）。防抖键此时会退化成 `group:{platform}:{session}:{uid}`（`messaging/message_pipeline.py:169`），两者形状不一致，群轮次隔离会静默失效。
-- `_group_turn_for` 只在 `debounce.group_enabled` 为真时被查询（`plugin.py:1294`、`plugin.py:1328`）。关掉群防抖时群轮次表根本不写，Replyer 的群被动轮就走私聊/主动任务的归因逻辑。
-- `_is_latest_group_turn`（`plugin.py:819-823`）只在**同一 `turn_scope` 内**比较 generation，所以不同群的轮次互不干扰（Focus 共享 session 的场景）。
-- `_has_recent_group_turn`（`plugin.py:814-817`）让 `on_planner` 识别「群被动轮」并跳过私聊背景注入（`plugin.py:1243-1246`），这是 Focus 共享 session 时不泄露私聊上下文的关键（`tests/test_message_experience.py:121` `test_focus_shared_group_turn_never_injects_private_context`，未运行）。
+- `_group_scope` 在 `group_id` 或 `user_id` 缺失时返回**空串**（`plugin.py:806`），此时 `_cancel_group_confirmations("")` 直接 no-op（`plugin.py:792`）。防抖键此时会退化成 `group:{platform}:{session}:{uid}`（`messaging/message_pipeline.py:169`），两者形状不一致，群轮次隔离会静默失效。
+- `_group_turn_for` 只在 `debounce.group_enabled` 为真时被查询（`plugin.py:1296`、`plugin.py:1330`）。关掉群防抖时群轮次表根本不写，Replyer 的群被动轮就走私聊/主动任务的归因逻辑。
+- `_is_latest_group_turn`（`plugin.py:821-825`）只在**同一 `turn_scope` 内**比较 generation，所以不同群的轮次互不干扰（Focus 共享 session 的场景）。
+- `_has_recent_group_turn`（`plugin.py:816-819`）让 `on_planner` 识别「群被动轮」并跳过私聊背景注入（`plugin.py:1245-1248`），这是 Focus 共享 session 时不泄露私聊上下文的关键（`tests/test_message_experience.py:121` `test_focus_shared_group_turn_never_injects_private_context`，未运行）。
 
 ### 5.5 私聊管线与休息闸门
 
-`plugin.py:1043-1120`。顺序：
+`plugin.py:1045-1122`。顺序：
 
-1. 预计算 `media_hint`（`plugin.py:1048-1050`）
-2. `not uid or is_command(message)` → 撤回检查后 `abort`/`continue`（`plugin.py:1051-1052`）
-3. `get_user(uid)`，未配置或未启用 → `abort`/`continue`（`plugin.py:1053-1055`）。**只处理配置的私聊用户**。
-4. 绑定/更新 `stream_id` 与展示名（`plugin.py:1056-1059`）
-5. `collect`，异常时失败开放（`plugin.py:1061-1064`，注意这里直接 `return {"action":"continue"}`，不带 `modified_kwargs`）
+1. 预计算 `media_hint`（`plugin.py:1050-1052`）
+2. `not uid or is_command(message)` → 撤回检查后 `abort`/`continue`（`plugin.py:1053-1054`）
+3. `get_user(uid)`，未配置或未启用 → `abort`/`continue`（`plugin.py:1055-1057`）。**只处理配置的私聊用户**。
+4. 绑定/更新 `stream_id` 与展示名（`plugin.py:1058-1061`）
+5. `collect`，异常时失败开放（`plugin.py:1063-1066`，注意这里直接 `return {"action":"continue"}`，不带 `modified_kwargs`）
 6. `not allowed` → `abort`
-7. 停机/热重载/热禁用 → 保留合并结果放行（`plugin.py:1067-1070`）
-8. 重新取身份、`register_turn`、`_discard_recalled_private_turn`（`plugin.py:1071-1076`）
+7. 停机/热重载/热禁用 → 保留合并结果放行（`plugin.py:1069-1072`）
+8. 重新取身份、`register_turn`、`_discard_recalled_private_turn`（`plugin.py:1073-1078`）
 9. `classify_intent(text, media)`（`messaging/message_pipeline.py:81-93`）——本地初判，不调模型
-10. `record_interaction`（`plugin.py:1079-1083`）：纯空消息不写，避免「发送了一条消息」污染关系时间线
-11. 后台任务：`continuity.refresh`、`memory.observe_message`，都用 `message_keys` 绑定来源消息（`plugin.py:1084-1090`）
-12. **休息闸门** `self._rest.decide(...)`（`plugin.py:1093`）
-13. 闸门阻断时：非 `BLOCK_REASON` 才写 `add_rest_backlog`（`plugin.py:1096-1101`），然后 `abort`
-14. 写入 `_session_runtime[session]`、`_cancel_reply_confirmations(session)`、`_active_tasks.note_inbound(session)` + `_supersede_active_task`（`plugin.py:1117-1131`）
+10. `record_interaction`（`plugin.py:1081-1085`）：纯空消息不写，避免「发送了一条消息」污染关系时间线
+11. 后台任务：`continuity.refresh`、`memory.observe_message`，都用 `message_keys` 绑定来源消息（`plugin.py:1086-1092`）
+12. **休息闸门** `self._rest.decide(...)`（`plugin.py:1095`）
+13. 闸门阻断时：非 `BLOCK_REASON` 才写 `add_rest_backlog`（`plugin.py:1098-1103`），然后 `abort`
+14. 写入 `_session_runtime[session]`、`_cancel_reply_confirmations(session)`、`_active_tasks.note_inbound(session)` + `_supersede_active_task`（`plugin.py:1119-1133`）
 
-**为什么「运行态最后才写」**：注释在 `plugin.py:1106-1107`——只有真正进入主链的消息才写运行态、取消上一轮待发送内容并取代旧主动任务归因；被闸门阻断/命令/未配置用户的消息不写，避免「急事回复被静默丢弃」与醒来提交错归因。
+**为什么「运行态最后才写」**：注释在 `plugin.py:1108-1109`——只有真正进入主链的消息才写运行态、取消上一轮待发送内容并取代旧主动任务归因；被闸门阻断/命令/未配置用户的消息不写，避免「急事回复被静默丢弃」与醒来提交错归因。
 
 #### 5.5.1 休息闸门在管线中的位置
 
-私聊 `RestGate.decide`（`life/rest_gate.py:124-199`）与群聊 `decide_group`（`life/rest_gate.py:92-114`）的**全部分支、两条触发路径（时间窗 OR 日程类型）、boundary 三分类、LLM 判定与退化窗告警详见 §4.7**，本章只强调管线视角的三个事实：
+私聊 `RestGate.decide`（`life/rest_gate.py:142-222`）与群聊 `decide_group`（`life/rest_gate.py:105-132`）的**全部分支、触发路径（时间窗优先、日程类型兜底）、boundary 三分类、LLM 判定与退化窗告警详见 §4.7**，本章只强调管线视角的三个事实：
 
-- 私聊闸门在互动记录与后台观察**之后**调用（`plugin.py:1093`）——被阻断的消息仍然已经进了互动历史与记忆观察，只是不进 Planner/Replyer；
-- 群闸门在群轮次登记**之前**调用（`plugin.py:1010-1020`），阻断即 `abort`，不产生任何主程序请求；
-- `commit_for_send` 只在**平台确认发送成功后**消费候选，而且只在非主动/非转述的普通被动回复路径调用（`plugin.py:1590-1592`、`plugin.py:1617-1620`）。主动任务不会改变休息状态。
+- 私聊闸门在互动记录与后台观察**之后**调用（`plugin.py:1095`）——被阻断的消息仍然已经进了互动历史与记忆观察，只是不进 Planner/Replyer；
+- 群闸门在群轮次登记**之前**调用（`plugin.py:1012-1022`），阻断即 `abort`，不产生任何主程序请求；
+- `commit_for_send` 只在**平台确认发送成功后**消费候选，而且只在非主动/非转述的普通被动回复路径调用（`plugin.py:1592-1594`、`plugin.py:1619-1622`）。主动任务不会改变休息状态。
 
-**为什么群聊要轻量**：`life/rest_gate.py:94-98` 的注释——被阻断的消息不进入主程序，因此不产生 Planner/Replyer/VLM 等请求。群消息频率高，概率放行和候选机制在群里没有意义。
+**为什么群聊要轻量**：`life/rest_gate.py:107-111` 的注释——被阻断的消息不进入主程序，因此不产生 Planner/Replyer/VLM 等请求。群消息频率高，概率放行和候选机制在群里没有意义。
 
 ### 5.6 Planner 注入：`on_planner`
 
-`plugin.py:1237-1276`。`HookHandler("maisaka.planner.before_request", mode=BLOCKING)`。
+`plugin.py:1239-1278`。`HookHandler("maisaka.planner.before_request", mode=BLOCKING)`。
 
 #### 5.6.1 归因识别
 
-`_activate_planner_task`（`plugin.py:707-754`）把 Planner 历史里的虚拟任务标记映射到数据库记录：
+`_activate_planner_task`（`plugin.py:709-756`）把 Planner 历史里的虚拟任务标记映射到数据库记录：
 
 - 无标记时：若近期有群轮次则返回 `None`（群被动轮不借用旧主动任务），否则返回当前 active 任务
 - 有标记但 `plugin_id`/前缀不符 → 清空 active 并作废前一个
-- 优先用 `mai_life_event_id` / `mai_life_relay_id` 元数据定位记录，避免毫秒级 task_id 碰撞（`plugin.py:719-728` 注释）
+- 优先用 `mai_life_event_id` / `mai_life_relay_id` 元数据定位记录，避免毫秒级 task_id 碰撞（`plugin.py:721-730` 注释）
 - 记录 `pending/sending` 且已过期 → 标记 `expired`
 
 #### 5.6.2 suffix 的组装顺序（这就是「注入顺序」）
 
-`plugin.py:1245-1274`，严格按这个顺序拼接：
+`plugin.py:1247-1276`，严格按这个顺序拼接：
 
 1. `self._prompts.planner(...)` —— 生活背景主体（仅 `context.enabled` 且非群被动轮）
 2. `self._recall.planner_context(session, include_ids=not is_group_session)` —— 撤回边界
@@ -2009,17 +2010,17 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 6. `self._relay.prompt_context(session, task_id)` —— 转述边界
 7. `self._moment_guide_note(...)` —— 麦麦绘图联动引导
 
-**为什么第 7 项要单独追加**：注释在 `plugin.py:1284-1285`——它是独立 suffix，**不受 `_clip(4000)` 截断影响**。生活背景被截断时绘图引导仍能完整送达。
+**为什么第 7 项要单独追加**：注释在 `plugin.py:1286-1287`——它是独立 suffix，**不受 `_clip(4000)` 截断影响**。生活背景被截断时绘图引导仍能完整送达。
 
-**为什么第 4 项要改写最后一条用户消息**：`plugin.py:1258-1265` 注释——避免 Replyer 输出被取消后 Host 把空回复当成失败而进入「思考-取消-再思考」循环。改写动作由 `_neutralize_recalled_latest_payload`（`plugin.py:1219-1235`）完成，同时兼容 `items`（1.2.0+）和 `messages`（旧版）两种载荷。
+**为什么第 4 项要改写最后一条用户消息**：`plugin.py:1260-1267` 注释——避免 Replyer 输出被取消后 Host 把空回复当成失败而进入「思考-取消-再思考」循环。改写动作由 `_neutralize_recalled_latest_payload`（`plugin.py:1221-1237`）完成，同时兼容 `items`（1.2.0+）和 `messages`（旧版）两种载荷。
 
 #### 5.6.3 注入 mechanics：两套契约
 
-`_inject_planner_context`（`plugin.py:1183-1195`）：
+`_inject_planner_context`（`plugin.py:1185-1197`）：
 
-- `kwargs["items"]` 是 list → `_append_item_text`（`plugin.py:1161-1181`）就地追加：优先找**最后一条** `SystemMessageItem` 的 text part；没有则在下标 0 插入新的 `SystemMessageItem`，并补齐 `meta.item_id` / `logical_turn_id` / `timestamp`
-- `kwargs["messages"]` 是 list → `_planner_messages_with_context`（`plugin.py:1197-1206`）：并入已有的 `role=="system"` 消息，没有则在头部插入
-- 两个键都不存在 → **放弃本次注入**，`return {"action":"continue"}`（`plugin.py:1194-1195` 注释：契约再次变化，宁可放弃也不改坏载荷）
+- `kwargs["items"]` 是 list → `_append_item_text`（`plugin.py:1163-1183`）就地追加：优先找**最后一条** `SystemMessageItem` 的 text part；没有则在下标 0 插入新的 `SystemMessageItem`，并补齐 `meta.item_id` / `logical_turn_id` / `timestamp`
+- `kwargs["messages"]` 是 list → `_planner_messages_with_context`（`plugin.py:1199-1208`）：并入已有的 `role=="system"` 消息，没有则在头部插入
+- 两个键都不存在 → **放弃本次注入**，`return {"action":"continue"}`（`plugin.py:1196-1197` 注释：契约再次变化，宁可放弃也不改坏载荷）
 
 **容易踩的坑**：`_append_item_text` 里 `item_id` 必须唯一（用了 `uuid4().hex`）、`timestamp` 必须能被 `datetime.fromisoformat` 解析（用了 `datetime.now().isoformat()`）。这两个约束是 Host 侧 Context Item 的硬要求，写错会直接让 Planner 请求失败。
 
@@ -2075,23 +2076,23 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 9. `_phase_notes(...)`（`messaging/prompt_builder.py:195`）
 10. `_clip(text, max_chars, "背景不相关时不要强行提及，不要逐项播报状态。\n")`（`messaging/prompt_builder.py:197`）
 
-**Planner 与 Replyer 的差异（刻意裁剪）**：Replyer 侧**没有** `hunger`、`mood_arousal`、`health_note`、`sleep_phase`、`dream`、`lunar`、`solar_term`、`platform`、`adapter`、`chat_type`、下一日程、`temperature` 原值（只留 `relationship_stage`）。上限也小得多：`plugin.py:1301` 传 `min(2400, prompt_max_chars)`，Planner 传 `prompt_max_chars`（`plugin.py:1250`）。
+**Planner 与 Replyer 的差异（刻意裁剪）**：Replyer 侧**没有** `hunger`、`mood_arousal`、`health_note`、`sleep_phase`、`dream`、`lunar`、`solar_term`、`platform`、`adapter`、`chat_type`、下一日程、`temperature` 原值（只留 `relationship_stage`）。上限也小得多：`plugin.py:1303` 传 `min(2400, prompt_max_chars)`，Planner 传 `prompt_max_chars`（`plugin.py:1252`）。
 
 **为什么这样设计**：Planner 做决策需要完整状态；Replyer 只负责把话说自然，塞满数值会让它逐项播报状态（`messaging/prompt_builder.py:181` 的「不要逐项汇报状态」就是为此）。
 
 #### 5.7.4 注入数据的来源
 
-`_prompt_payload`（`plugin.py:1127-1152`）：
+`_prompt_payload`（`plugin.py:1129-1154`）：
 
-- `_user_by_session(session_id)`（`plugin.py:692-700`）解析不到已启用私聊用户 → 返回 `None`，**整块背景不注入**（`plugin.py:1133-1134` 有 debug 日志）
-- `continuity` 有时效：超过 14 天未互动则清空 `unresolved_topics`（`plugin.py:1138-1139`）
-- `backlogs`：Planner 走 `peek_rest_backlogs`，Replyer 走 `consume_rest_backlogs`（`plugin.py:1140`，由 `consume_backlog` 参数区分）。**只有 Replyer 真正跑起来才消费积压**
-- `bedtime="approaching"` 只对私聊注入（`plugin.py:1142-1144`）
-- `environment` 快照的 `platform`/`adapter`/`media` 全部来自 `_session_runtime`（`plugin.py:1147-1148`）
+- `_user_by_session(session_id)`（`plugin.py:694-702`）解析不到已启用私聊用户 → 返回 `None`，**整块背景不注入**（`plugin.py:1135-1136` 有 debug 日志）
+- `continuity` 有时效：超过 14 天未互动则清空 `unresolved_topics`（`plugin.py:1140-1141`）
+- `backlogs`：Planner 走 `peek_rest_backlogs`，Replyer 走 `consume_rest_backlogs`（`plugin.py:1142`，由 `consume_backlog` 参数区分）。**只有 Replyer 真正跑起来才消费积压**
+- `bedtime="approaching"` 只对私聊注入（`plugin.py:1144-1146`）
+- `environment` 快照的 `platform`/`adapter`/`media` 全部来自 `_session_runtime`（`plugin.py:1149-1150`）
 
 **容易踩的坑**：
 
-- `environment` 的 `platform` / `adapter` 取的是**上一条入站消息**的记录（`plugin.py:1147-1148`）。纯主动轮（无入站）里 `runtime` 可能是空字典，于是 `platform="qq"`、`adapter="unknown"`、`media=["text"]`。日志里看到主动轮的适配器是 unknown 是正常的。
+- `environment` 的 `platform` / `adapter` 取的是**上一条入站消息**的记录（`plugin.py:1149-1150`）。纯主动轮（无入站）里 `runtime` 可能是空字典，于是 `platform="qq"`、`adapter="unknown"`、`media=["text"]`。日志里看到主动轮的适配器是 unknown 是正常的。
 - `_memory_text` 对非主人返回「当前关系无权读取私人日记」而不是「最近还没有生成生活日记」（`messaging/prompt_builder.py:79`）——刻意区分「还没有」与「无权读」，避免对朋友显示越界文案。
 - `planner()` 的输出里 `【生活记忆】` 和 `【当前关系可见书柜】` 两个标题实际嵌在「当前网友关系与连续话题」块内部（`_memory_text` 返回值不带结尾换行，`messaging/prompt_builder.py:162-163` 直接拼接）。这是既有的格式特性，我在实跑输出里确认了。改动这两行时会同时影响标题层级。
 - `_topic_note` 的存在理由写在 `messaging/prompt_builder.py:93-97`：背景块的压制性措辞让搜索/新闻内容几乎永远不被提起，所以单独给关联分最高的一条开一个合法分享框架，其余仍按背景处理。
@@ -2100,77 +2101,77 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 
 #### 5.8.1 `on_replyer`（注入）
 
-`plugin.py:1288-1313`。`HookHandler("maisaka.replyer.before_request", mode=BLOCKING)`。
+`plugin.py:1290-1315`。`HookHandler("maisaka.replyer.before_request", mode=BLOCKING)`。
 
-- `group_turn = self._group_turn_for(session, anchor)`；命中群轮次时**不注入任何私聊背景**（`plugin.py:1294-1296`）
-- `active = None if group_turn else await self._active_tasks.current(...)`（`plugin.py:1295`）
+- `group_turn = self._group_turn_for(session, anchor)`；命中群轮次时**不注入任何私聊背景**（`plugin.py:1296-1298`）
+- `active = None if group_turn else await self._active_tasks.current(...)`（`plugin.py:1297`）
 - `_prompt_payload(session, consume_backlog=True)` —— 注意这里才消费积压
 - `suffix` 顺序：`replyer()` 背景 → `planner_context` → `query_prompt_context` → `relay.prompt_context`
-- 写入 `kwargs["extra_prompt"]`（`plugin.py:1312`），**不是**改 `items`/`messages`
+- 写入 `kwargs["extra_prompt"]`（`plugin.py:1314`），**不是**改 `items`/`messages`
 
 **容易踩的坑**：Replyer 用 `extra_prompt`，Planner 用 `items`/`messages`。两条路径的契约不同，新增注入点时不要照抄。
 
 #### 5.8.2 `on_replyer_after`（输出收口）
 
-`plugin.py:1323-1445`。`HookHandler("maisaka.replyer.after_response", mode=BLOCKING)`。这是整条链上最密集的闸门，按顺序：
+`plugin.py:1325-1447`。`HookHandler("maisaka.replyer.after_response", mode=BLOCKING)`。这是整条链上最密集的闸门，按顺序：
 
 | # | 检查 | 抑制原因 | 行号 |
 |---|---|---|---|
-| 1 | 撤回墓碑（`anchor` + `recall_turn_anchor` + `recall_sources`） | `recalled` | `plugin.py:1336-1338` |
-| 2 | 群轮次已被更新轮次取代 | `stale_group_turn` | `plugin.py:1339-1341` |
-| 3 | 注册 Replyer 锚点到真实入站轮次 | （写入，不抑制） | `plugin.py:1342-1347` |
-| 4 | 归属校验：无 user / 无群轮次 / 无 relay / 无 proactive / 非 own_task | 直接 `continue` 不抑制 | `plugin.py:1348-1352` |
-| 5 | `active.sent` 已发送 | `active_task_already_sent` | `plugin.py:1359-1361` |
-| 6 | own_task 但无任何持久候选 | `missing_attribution` | `plugin.py:1362-1365` |
-| 7 | proactive 候选过期/已取消/已失败 | `proactive_expired` / `proactive_cancelled` | `plugin.py:1369-1381` |
-| 8 | relay 候选过期/失效 | `relay_expired` | `plugin.py:1382-1392` |
-| 9 | 停机/热重载/插件或模块被关 | `plugin_disabled` | `plugin.py:1393-1402` |
-| 10 | 朋友边界：命中 `owner_only_terms` | 可重试则要求重生成，否则 `friend_boundary_retry_exhausted` | `plugin.py:1405-1417` |
-| 11 | 持久轮次锁 `reserve_reply_turn` 未拿到 | `duplicate_turn` | `plugin.py:1422-1428` |
-| 12 | `_active_tasks.reserve_reply` 失败 | `reply_reserve_failed` | `plugin.py:1429-1432` |
-| 13 | 全部通过 → 写 `_reply_confirmations[(session, anchor)]` | — | `plugin.py:1434-1444` |
+| 1 | 撤回墓碑（`anchor` + `recall_turn_anchor` + `recall_sources`） | `recalled` | `plugin.py:1338-1340` |
+| 2 | 群轮次已被更新轮次取代 | `stale_group_turn` | `plugin.py:1341-1343` |
+| 3 | 注册 Replyer 锚点到真实入站轮次 | （写入，不抑制） | `plugin.py:1344-1349` |
+| 4 | 归属校验：无 user / 无群轮次 / 无 relay / 无 proactive / 非 own_task | 直接 `continue` 不抑制 | `plugin.py:1350-1354` |
+| 5 | `active.sent` 已发送 | `active_task_already_sent` | `plugin.py:1361-1363` |
+| 6 | own_task 但无任何持久候选 | `missing_attribution` | `plugin.py:1364-1367` |
+| 7 | proactive 候选过期/已取消/已失败 | `proactive_expired` / `proactive_cancelled` | `plugin.py:1371-1383` |
+| 8 | relay 候选过期/失效 | `relay_expired` | `plugin.py:1384-1394` |
+| 9 | 停机/热重载/插件或模块被关 | `plugin_disabled` | `plugin.py:1395-1404` |
+| 10 | 朋友边界：命中 `owner_only_terms` | 可重试则要求重生成，否则 `friend_boundary_retry_exhausted` | `plugin.py:1407-1419` |
+| 11 | 持久轮次锁 `reserve_reply_turn` 未拿到 | `duplicate_turn` | `plugin.py:1424-1430` |
+| 12 | `_active_tasks.reserve_reply` 失败 | `reply_reserve_failed` | `plugin.py:1431-1434` |
+| 13 | 全部通过 → 写 `_reply_confirmations[(session, anchor)]` | — | `plugin.py:1436-1446` |
 
-`_suppress_response`（`plugin.py:1315-1321`）统一把 `response` 清空并打上 `mai_life_suppressed` / `mai_life_suppress_reason`，让上游与日志能区分「插件抑制」与「模型空回复」。
+`_suppress_response`（`plugin.py:1317-1323`）统一把 `response` 清空并打上 `mai_life_suppressed` / `mai_life_suppress_reason`，让上游与日志能区分「插件抑制」与「模型空回复」。
 
-**为什么分 11/12 两层锁**：注释在 `plugin.py:1418`——持久层轮次锁负责跨热重载防重（`reply_turns` 表，`core/storage.py:2065-2079`），活动任务锁再限制同一主动任务只产生一轮回复。`reserve_reply_turn` 是「INSERT 成功即独占」，同一 `(session_id, anchor_message_id)` 第二次必然失败（`core/storage.py:2074`）。
+**为什么分 11/12 两层锁**：注释在 `plugin.py:1420`——持久层轮次锁负责跨热重载防重（`reply_turns` 表，`core/storage.py:2065-2079`），活动任务锁再限制同一主动任务只产生一轮回复。`reserve_reply_turn` 是「INSERT 成功即独占」，同一 `(session_id, anchor_message_id)` 第二次必然失败（`core/storage.py:2074`）。
 
-**迟到放行的设计**：`proactive_late_ok` / `relay_late_ok`（`plugin.py:1369-1371`、`plugin.py:1382-1384`）允许「事件已过期但 active 归因仍存活且候选未结算」的输出发出。注释在 `plugin.py:1366-1368`：视为本次任务的合法产出，允许发送并由 `after_send` 结算，不标记过期、不重试。对应 `ActiveTaskRegistry` 里 pending 过期窗与保留窗解耦的 120 秒设计（`messaging/task_context.py:128-130`）。
+**迟到放行的设计**：`proactive_late_ok` / `relay_late_ok`（`plugin.py:1371-1373`、`plugin.py:1384-1386`）允许「事件已过期但 active 归因仍存活且候选未结算」的输出发出。注释在 `plugin.py:1368-1370`：视为本次任务的合法产出，允许发送并由 `after_send` 结算，不标记过期、不重试。对应 `ActiveTaskRegistry` 里 pending 过期窗与保留窗解耦的 120 秒设计（`messaging/task_context.py:128-130`）。
 
-**容易踩的坑**：`turn_anchor = task_id if active else anchor`（`plugin.py:1419`）——主动任务的轮次锁锚点是**任务 ID**，被动回复才是消息 ID。两者混用会让锁失效。`tests/test_task_context.py:116` `test_real_log_cross_anchor_duplicate_is_blocked_for_both_adapters` 覆盖了这一点（未运行）。
+**容易踩的坑**：`turn_anchor = task_id if active else anchor`（`plugin.py:1421`）——主动任务的轮次锁锚点是**任务 ID**，被动回复才是消息 ID。两者混用会让锁失效。`tests/test_task_context.py:116` `test_real_log_cross_anchor_duplicate_is_blocked_for_both_adapters` 覆盖了这一点（未运行）。
 
 ### 5.9 发送确认：`on_send_before` / `on_send_after`
 
 #### 5.9.1 `on_send_before`
 
-`plugin.py:1447-1537`。`HookHandler("send_service.before_send", mode=BLOCKING)`。
+`plugin.py:1449-1539`。`HookHandler("send_service.before_send", mode=BLOCKING)`。
 
-1. `recall_anchors()` 汇总 `anchor` + `turn_anchor` + `recall_turn_anchor` + `wake_message_id` + 全部 `source_message_ids`（`plugin.py:1455-1462`）。**一个可见回复可能关联合并源、Replyer 锚点和待醒消息，任一被撤回都应取消整轮。**
-2. `recalled_now()`：命中则清待醒候选、标记确认记录取消、`_cancel_recalled_confirmations`、弹出确认记录，返回 `abort`（`plugin.py:1463-1476`）
-3. `confirmation_cancelled()`：确认记录已被标记取消且未被替换 → `abort`（`plugin.py:1473-1479`）
-4. **群防抖轮次不借用同 session 下的私聊/主动任务归因**（`plugin.py:1481-1482`）：`turn_scope` 以 `group:` 开头时强制 `active=None`
-5. proactive 检查：`set_reply` 置假（`proactive:*` 不是 QQ 消息号，禁止 NapCat 编码成无效 reply 段，`plugin.py:1487-1489`）；过期/禁用/已失败 → `abort`
-6. `anchor.startswith(HOST_TASK_PREFIX)` 但既无 proactive 又无 relay → `abort`（`plugin.py:1503-1504`，孤儿 Host 任务一律静默）
-7. `active` 存在时 `reserve_send`（`plugin.py:1513-1514`），并把 `mai_life_active_task_id` / `mai_life_reply_anchor` 写进 `message_info.additional_config`（`plugin.py:1515-1518`）
-8. **数据库查询期间真实入站可能取消旧轮次，交付适配器前再复核一次**（`plugin.py:1519-1522`，注释明说）
-9. relay 的 `should_abort_send` / `mutate_before_send`，之后再复核一次撤回（`plugin.py:1525-1533`）
+1. `recall_anchors()` 汇总 `anchor` + `turn_anchor` + `recall_turn_anchor` + `wake_message_id` + 全部 `source_message_ids`（`plugin.py:1457-1464`）。**一个可见回复可能关联合并源、Replyer 锚点和待醒消息，任一被撤回都应取消整轮。**
+2. `recalled_now()`：命中则清待醒候选、标记确认记录取消、`_cancel_recalled_confirmations`、弹出确认记录，返回 `abort`（`plugin.py:1465-1478`）
+3. `confirmation_cancelled()`：确认记录已被标记取消且未被替换 → `abort`（`plugin.py:1475-1481`）
+4. **群防抖轮次不借用同 session 下的私聊/主动任务归因**（`plugin.py:1483-1484`）：`turn_scope` 以 `group:` 开头时强制 `active=None`
+5. proactive 检查：`set_reply` 置假（`proactive:*` 不是 QQ 消息号，禁止 NapCat 编码成无效 reply 段，`plugin.py:1489-1491`）；过期/禁用/已失败 → `abort`
+6. `anchor.startswith(HOST_TASK_PREFIX)` 但既无 proactive 又无 relay → `abort`（`plugin.py:1505-1506`，孤儿 Host 任务一律静默）
+7. `active` 存在时 `reserve_send`（`plugin.py:1515-1516`），并把 `mai_life_active_task_id` / `mai_life_reply_anchor` 写进 `message_info.additional_config`（`plugin.py:1517-1520`）
+8. **数据库查询期间真实入站可能取消旧轮次，交付适配器前再复核一次**（`plugin.py:1521-1524`，注释明说）
+9. relay 的 `should_abort_send` / `mutate_before_send`，之后再复核一次撤回（`plugin.py:1527-1535`）
 
-**为什么 `set_reply=False`**：注释在 `plugin.py:1487-1488` 与 `messaging/task_context.py:302-305`——`proactive:xxx` 是 Host 内部锚点，宿主 reply 工具的 `find_source_message_by_id` 查不到，`to_display_message_id` 还会把锚点哈希成 7 位乱码，模型看不懂报错会反复重试。
+**为什么 `set_reply=False`**：注释在 `plugin.py:1489-1490` 与 `messaging/task_context.py:302-305`——`proactive:xxx` 是 Host 内部锚点，宿主 reply 工具的 `find_source_message_by_id` 查不到，`to_display_message_id` 还会把锚点哈希成 7 位乱码，模型看不懂报错会反复重试。
 
 #### 5.9.2 `on_send_after`
 
-`plugin.py:1539-1622`。`HookHandler("send_service.after_send", mode=OBSERVE)`——观测模式，不阻断，只按平台实际结果结算。
+`plugin.py:1541-1624`。`HookHandler("send_service.after_send", mode=OBSERVE)`——观测模式，不阻断，只按平台实际结果结算。
 
-1. `relay.confirm_after_send(message, sent)`（`plugin.py:1545`，即使发送期间热禁用了社交模块也要收口）
-2. 从 `additional_config.mai_life_active_task_id` 取任务号 → `_active_tasks.finish_send(...)`（`plugin.py:1549-1551`）
-3. 取确认记录；`reply_message_id` 缺失时的降级关联：**只在会话中恰有一个候选时**才降级（`plugin.py:1553-1556`）
-4. 主动任务结算：`sent=True` 时按 `event_id` / `host_task_id` 精确 `mark_pending_sent`，并区分「重复确认已结算」与「真未命中」（`plugin.py:1569-1586`）
-5. 无确认记录且非 pending：无锚点发送**不能**误叫醒正在休息的麦麦（`plugin.py:1588-1595`）
-6. `sent=False` → 释放轮次锁、待醒候选、`release_reply`，主动事件标 `failed` 并归还契机（`plugin.py:1603-1615`）
-7. `sent=True` 且非主动归因 → `commit_for_send` 正式叫醒 + `_record_mood_event("passive_reply")`（`plugin.py:1616-1621`）
+1. `relay.confirm_after_send(message, sent)`（`plugin.py:1547`，即使发送期间热禁用了社交模块也要收口）
+2. 从 `additional_config.mai_life_active_task_id` 取任务号 → `_active_tasks.finish_send(...)`（`plugin.py:1551-1553`）
+3. 取确认记录；`reply_message_id` 缺失时的降级关联：**只在会话中恰有一个候选时**才降级（`plugin.py:1555-1558`）
+4. 主动任务结算：`sent=True` 时按 `event_id` / `host_task_id` 精确 `mark_pending_sent`，并区分「重复确认已结算」与「真未命中」（`plugin.py:1571-1588`）
+5. 无确认记录且非 pending：无锚点发送**不能**误叫醒正在休息的麦麦（`plugin.py:1590-1597`）
+6. `sent=False` → 释放轮次锁、待醒候选、`release_reply`，主动事件标 `failed` 并归还契机（`plugin.py:1605-1617`）
+7. `sent=True` 且非主动归因 → `commit_for_send` 正式叫醒 + `_record_mood_event("passive_reply")`（`plugin.py:1618-1623`）
 
-**为什么第 3 步要限定「恰有一个候选」**：`plugin.py:1588-1590` 注释——无锚点发送无法安全归因，不能因此误叫醒正在休息的麦麦。宁可漏一次醒来，也不能错一次。
+**为什么第 3 步要限定「恰有一个候选」**：`plugin.py:1590-1592` 注释——无锚点发送无法安全归因，不能因此误叫醒正在休息的麦麦。宁可漏一次醒来，也不能错一次。
 
-**容易踩的坑**：`on_send_after` 是 `OBSERVE` 模式，异常不会阻断发送，但会让结算丢失（醒来不提交、额度不归还、任务停在 pending）。`plugin.py:1567-1568` 的注释特别说明：主动任务结算不依赖 `confirmation` 是否命中，也不要求事件仍处于 pending，因为发送确认可能跨越 120 秒过期边界。
+**容易踩的坑**：`on_send_after` 是 `OBSERVE` 模式，异常不会阻断发送，但会让结算丢失（醒来不提交、额度不归还、任务停在 pending）。`plugin.py:1569-1570` 的注释特别说明：主动任务结算不依赖 `confirmation` 是否命中，也不要求事件仍处于 pending，因为发送确认可能跨越 120 秒过期边界。
 
 ### 5.10 `adapter_compat`：两套适配器兼容层
 
@@ -2244,16 +2245,16 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 
 #### 5.11.2 `_handle_recall`：墓碑先行
 
-`plugin.py:871-915`。顺序刻意安排：
+`plugin.py:873-917`。顺序刻意安排：
 
 1. `record_notice`（`messaging/recall_service.py:130`）**先把持久墓碑落库**
-2. `_cancel_message_tasks(session, message_id)` —— 取消该消息派生的临时任务（`plugin.py:879`，经 `plugin.py:378-381`）
-3. `self._debouncer.recall(session, message_id)` —— 从尚未收口的窗口里摘掉（`plugin.py:880`）
-4. `_cancel_recalled_confirmations(session, anchors, message_id)`（`plugin.py:881`）—— 只取消命中的回复轮次，不干扰同会话之后真正的新消息
-5. 清待醒候选（`plugin.py:882-883`）
-6. 私聊：`redact_recalled_private_artifacts` + `save_continuity(user_id, "", [], now)`（`plugin.py:884-889`）
-7. 群聊：通知群观察者、摘除群轮次、释放轮次锁（`plugin.py:890-903`）
-8. `needs_summary_recovery` 为真时**后台**跑 `recover_notice_summary`（`plugin.py:904-908`）
+2. `_cancel_message_tasks(session, message_id)` —— 取消该消息派生的临时任务（`plugin.py:881`，经 `plugin.py:380-383`）
+3. `self._debouncer.recall(session, message_id)` —— 从尚未收口的窗口里摘掉（`plugin.py:882`）
+4. `_cancel_recalled_confirmations(session, anchors, message_id)`（`plugin.py:883`）—— 只取消命中的回复轮次，不干扰同会话之后真正的新消息
+5. 清待醒候选（`plugin.py:884-885`）
+6. 私聊：`redact_recalled_private_artifacts` + `save_continuity(user_id, "", [], now)`（`plugin.py:886-891`）
+7. 群聊：通知群观察者、摘除群轮次、释放轮次锁（`plugin.py:892-905`）
+8. `needs_summary_recovery` 为真时**后台**跑 `recover_notice_summary`（`plugin.py:906-910`）
 9. 标记 `_session_runtime[session]["recalled"] = True`（若该消息是本轮来源之一）
 
 **为什么摘要恢复必须放后台**：`messaging/recall_service.py:164` 注释——取消链完成后再尽力读取 Host 文本，绝不让摘要 RPC 阻塞发送拦截。`_recover_summary` 有 3.0 秒 `asyncio.wait_for` 超时（`messaging/recall_service.py:116-119`），且 `include_binary_data=False`。
@@ -2281,11 +2282,11 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 
 | 时机 | 调用点 | 判据 |
 |---|---|---|
-| Replyer 输出后 | `plugin.py:1336` | `anchor` + `recall_turn_anchor` + `recall_sources` |
-| 发送前（两次） | `plugin.py:1476`、`plugin.py:1520`、`plugin.py:1531` | `recall_anchors()` 全集 |
+| Replyer 输出后 | `plugin.py:1338` | `anchor` + `recall_turn_anchor` + `recall_sources` |
+| 发送前（两次） | `plugin.py:1478`、`plugin.py:1522`、`plugin.py:1533` | `recall_anchors()` 全集 |
 | 持久查询 | `core/storage.py:1312` | `recall_events` + `message_turn_sources` |
 
-`_is_recalled`（`plugin.py:844-857`）的注释：**持久墓碑是 Replyer 与逐段发送之间的最终防线，热重载后同样有效**。
+`_is_recalled`（`plugin.py:846-859`）的注释：**持久墓碑是 Replyer 与逐段发送之间的最终防线，热重载后同样有效**。
 
 #### 5.11.5 「本人撤回内容」查询
 
@@ -2296,38 +2297,38 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 - `planner_context` 群会话只提示「有撤回发生」，不列消息 ID（`messaging/recall_service.py:196-202`），减少无谓的信息暴露
 - `format_query_result`（`messaging/recall_service.py:241`）原供 `/麦麦撤回` 命令使用；该命令已于 v1.23.0 移除，方法按服务层契约保留、当前无生产调用方
 
-**为什么默认关闭**：`cache_summary_enabled` 默认 `False`（`config.py:986-993`），关闭时 `on_load` 会 `clear_recall_summaries()`（`plugin.py:269-270`）。保留期 `summary_ttl_minutes` 默认 10 分钟，长度上限 `summary_max_chars` 默认 240 字符。
+**为什么默认关闭**：`cache_summary_enabled` 默认 `False`（`config.py:986-993`），关闭时 `on_load` 会 `clear_recall_summaries()`（`plugin.py:271-272`）。保留期 `summary_ttl_minutes` 默认 10 分钟，长度上限 `summary_max_chars` 默认 240 字符。
 
 **容易踩的坑**：`recall_service.py:145-146` 有一段**看起来冗余的重复判断**（`if not self.config.recall.enabled or not self.config.recall.cache_summary_enabled: summary=""; media=[]; authorized=False`）。这是为热重载竞态准备的：上面的 `if self.config.recall.cache_summary_enabled and not group_id and user_id` 分支里有 `await self.store.get_user(user_id)`，配置可能在这期间被改掉。
 
 ### 5.12 命令菜单与文本发送
 
-命令路径与 AI 链路完全分离：`on_receive` 里 `is_command` 直接旁路（`plugin.py:981-982`、`plugin.py:1051-1052`），由 Host 按 `@Command` pattern 派发到 `cmd_*` 方法。
+命令路径与 AI 链路完全分离：`on_receive` 里 `is_command` 直接旁路（`plugin.py:983-984`、`plugin.py:1053-1054`），由 Host 按 `@Command` pattern 派发到 `cmd_*` 方法。
 
 #### 5.12.1 目录单一来源
 
 `COMMAND_SECTIONS`（`messaging/command_catalog.py:19-37`）是唯一目录，分四组：日常状态 / 生活记录 / 见闻与书柜 / 管理与诊断（v1.23.0 精简后依次为 2/3/1/3 项，共 9 项）。`build_command_usage_text`（`messaging/command_catalog.py:40`）生成不依赖 Markdown 的纯文本菜单内容——命令菜单的唯一发送形态。
 
-**为什么命令 pattern 不手写两份**：`_command_pattern_res()`（`plugin.py:2761-2768`）用 `__maibot_component_info__` 从 `@Command` 装饰实时收集全部 pattern，`_SUSPECT_COMMAND_RE` + `_matches_own_command`（`plugin.py:2773`、`plugin.py:2786`）据此判断「像命令但不是我们的命令」。新增命令时只需加 `@Command`，两处自动同步。
+**为什么命令 pattern 不手写两份**：`_command_pattern_res()`（`plugin.py:2806-2813`）用 `__maibot_component_info__` 从 `@Command` 装饰实时收集全部 pattern，`_SUSPECT_COMMAND_RE` + `_matches_own_command`（`plugin.py:2818`、`plugin.py:2831`）据此判断「像命令但不是我们的命令」。新增命令时只需加 `@Command`，两处自动同步。
 
-`_raw_command_text`（`plugin.py:2776-2783`）刻意不用 `direct_text`——后者会 strip，而手滑判断必须看原样（尾空格、大小写）。
+`_raw_command_text`（`plugin.py:2821-2828`）刻意不用 `direct_text`——后者会 strip，而手滑判断必须看原样（尾空格、大小写）。
 
 #### 5.12.2 权限模型
 
 | 判据 | 函数 | 语义 |
 |---|---|---|
-| `_command_access` | `plugin.py:1734-1741` | **群聊始终拒绝**；私聊需启用用户档案或显式管理员 |
-| `_command_user` | `plugin.py:1729-1732` | 返回私聊启用档案；群聊或仅有管理员身份时返回 `{}` |
-| `_is_owner_or_admin` | `plugin.py:1720-1723` | 管理员 或 档案 `role=="owner"` |
-| `_profile_required_notice` | `plugin.py:1743-1747` | 区分「管理员未生效」与「需要建档案」 |
+| `_command_access` | `plugin.py:1779-1786` | **群聊始终拒绝**；私聊需启用用户档案或显式管理员 |
+| `_command_user` | `plugin.py:1774-1777` | 返回私聊启用档案；群聊或仅有管理员身份时返回 `{}` |
+| `_is_owner_or_admin` | `plugin.py:1722-1768` | 管理员 或 档案 `role=="owner"` |
+| `_profile_required_notice` | `plugin.py:1788-1792` | 区分「管理员未生效」与「需要建档案」 |
 
-**为什么管理员是独立身份**：`plugin.py:1739` 注释——管理员不应被迫再创建一份私聊关系档案。`_is_admin` 在 `admin_user_ids` 为空时回退取第一个启用档案（`plugin.py:1714-1717`）。
+**为什么管理员是独立身份**：`plugin.py:1784` 注释——管理员不应被迫再创建一份私聊关系档案。`_is_admin` 在 `admin_user_ids` 为空时回退取第一个启用档案（`plugin.py:1716-1719`）。
 
 #### 5.12.5 纯文本发送
 
-`_send_command_menu`（`plugin.py:1755`）：v1.23.0 起菜单只有一条路径——直接调 `_send_command(kwargs, build_command_usage_text(notice))`。
+`_send_command_menu`（`plugin.py:1800`）：v1.23.0 起菜单只有一条路径——直接调 `_send_command(kwargs, build_command_usage_text(notice))`。
 
-`_send_command`（`plugin.py:1745`）：
+`_send_command`（`plugin.py:1790`）：
 
 1. `_command_access` 不过 → 文本替换为 `PRIVATE_COMMAND_ACCESS_DENIED`
 2. 经 `CommandReplyService.send_text_with_fallback`（`messaging/command_reply.py:113`）发送：成功 → 返回 `(True, "指令结果已发送（文本降级）", 2)`；`send` 返回 False → `(False, "发送返回 False", 2)`；抛异常 → `(False, "发送失败: …", 2)`
@@ -2343,9 +2344,9 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 
 #### 5.12.6 命令返回值契约
 
-所有 `cmd_*` 返回 `tuple[bool, str, int]`（如 `plugin.py:1796`）。这是 MaiBot SDK 的 Command 返回值解包约定——`maibot-plugin-dev` 技能里也把「Command 返回值解包」列为常见陷阱。
+所有 `cmd_*` 返回 `tuple[bool, str, int]`（如 `plugin.py:1841`）。这是 MaiBot SDK 的 Command 返回值解包约定——`maibot-plugin-dev` 技能里也把「Command 返回值解包」列为常见陷阱。
 
-**容易踩的坑**：`_send_command` 里 `platform` 默认 `"qq"`、`group_id` 从 `kwargs` 取。手滑命令兜底路径（`plugin.py:959-963`）是自己构造 kwargs 字典的，字段名必须与 `cmd_*` 收到的一致。
+**容易踩的坑**：`_send_command` 里 `platform` 默认 `"qq"`、`group_id` 从 `kwargs` 取。手滑命令兜底路径（`plugin.py:961-965`）是自己构造 kwargs 字典的，字段名必须与 `cmd_*` 收到的一致。
 
 ### 5.13 `task_context`：主动任务归因
 
@@ -2399,12 +2400,12 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 
 #### 5.13.6 与 plugin 侧的衔接
 
-- `_activate_planner_task`（`plugin.py:707`）把标记映射到 DB 记录后调 `activate`
-- `_supersede_active_task`（`plugin.py:756-770`）：真实入站优先于尚未发送的主动轮，作废候选并释放契机
-- `_active_tasks.note_inbound`（`plugin.py:1116`）在私聊真正进主链时调用
-- `update_retention` / `update_pending_expire`（`messaging/task_context.py:135-142`）由 `on_load` 和 `_apply_config_update` 调用（`plugin.py:263`、`plugin.py:331`）
+- `_activate_planner_task`（`plugin.py:709`）把标记映射到 DB 记录后调 `activate`
+- `_supersede_active_task`（`plugin.py:758-772`）：真实入站优先于尚未发送的主动轮，作废候选并释放契机
+- `_active_tasks.note_inbound`（`plugin.py:1118`）在私聊真正进主链时调用
+- `update_retention` / `update_pending_expire`（`messaging/task_context.py:135-142`）由 `on_load` 和 `_apply_config_update` 调用（`plugin.py:265`、`plugin.py:333`）
 
-**为什么热更新不清空注册表**：`plugin.py:330` 注释——WebUI 每次保存都重置会让进行中的任务失去归因。
+**为什么热更新不清空注册表**：`plugin.py:332` 注释——WebUI 每次保存都重置会让进行中的任务失去归因。
 
 ### 5.14 配置项速查（消息链路相关）
 
@@ -2433,13 +2434,13 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 | `rest_gate.wake_probability` | `0.18` | 概率模式叫醒率 |
 | `rest_gate.llm_threshold` | `70` | LLM 阈值 |
 | `rest_gate.awake_grace_minutes` | `30` | 醒来缓冲 |
-| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 额外生效日程类型 |
+| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 窗口未配置时兜底的日程类型 |
 | `rest_gate.force_wake_terms` | 12 词 | 强制唤醒词（同时被防抖读取） |
 | `rest_gate.night_start/end` | `22:30` / `08:00` | 夜窗（跨午夜） |
 | `rest_gate.nap_start/end` | `12:00` / `14:30` | 午休窗 |
 | `rest_gate.group_enabled` | `False` | 群闸门总开关 |
 | `rest_gate.group_mode` | `all` | all / selected |
-| `rest_gate.group_gate_segment_types` | `["sleep","nap"]` | 群额外生效类型 |
+| `rest_gate.group_gate_segment_types` | `["sleep","nap"]` | 群窗口未配置时兜底类型（Literal 纯选择） |
 | `rest_gate.group_force_wake_terms` | 12 词 | 群强制唤醒词（独立词表） |
 | `context.enabled` | `True` | 被动回复增强（`config.py:897`） |
 | `context.owner_only_terms` | 4 词 | 朋友回复禁用称呼 |
@@ -2450,18 +2451,18 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 ### 5.15 容易踩的坑（汇总）
 
 1. **`collect` 返回 `allowed=False` 必须 `abort`**。两条快速补话会产生两个 `collect` 调用，输家返回 `superseded`；不 abort 就是重复回复（本机实测：`t1: False superseded`）。
-2. **群防抖键与群轮次 scope 形状不同**。前者 `group:{platform}:{group_id or session}:{uid}` 永不空（`messaging/message_pipeline.py:169`），后者在 `group_id`/`user_id` 缺失时返回空串（`plugin.py:804`），导致取消逻辑静默失效。
+2. **群防抖键与群轮次 scope 形状不同**。前者 `group:{platform}:{group_id or session}:{uid}` 永不空（`messaging/message_pipeline.py:169`），后者在 `group_id`/`user_id` 缺失时返回空串（`plugin.py:806`），导致取消逻辑静默失效。
 3. **`night_start == night_end` = 窗口永假**，只剩日程类型一条路，用户完全看不出来——完整说明与告警机制见 §4.7。
-4. **`gate_segment_types` 默认含 sleep/nap**，闸门可能早于夜窗生效（`config.py:806` 配置文案自己写明了）；详见 §4.7。
+4. **`gate_segment_types` 默认含 sleep/nap**：v1.23.3 前闸门可能早于夜窗生效（用户实测踩坑后已改为时间窗优先），现在只有夜窗/午休窗起止相同（停用）时才回退该列表兜底；详见 §4.7。
 5. **`plain_text` 与 `direct_text` 语义不同**，前者展开合并转发、后者只读顶层。控制逻辑一律用 `direct_text`，否则合并转发里的原话会被当成指令（`messaging/message_pipeline.py:49`）。
 6. **合并后 `message_id` 是最后一条的**，撤回取消必须走 `mai_life_merged_message_ids` → `message_turn_sources` 链条。
-7. **`_is_recalled` 存储异常时失败开放**（`plugin.py:852-856`），别把 `return False` 当 bug。
+7. **`_is_recalled` 存储异常时失败开放**（`plugin.py:854-858`），别把 `return False` 当 bug。
 8. **Planner 用 `items`/`messages`，Replyer 用 `extra_prompt`**，两套契约别照抄。
-9. **`on_receive` 总预算 30 秒**（`plugin.py:936`），防抖等待 + 闸门 LLM + 生活分享判定 3.2s 都在里面。
-10. **主动任务的轮次锁锚点是 task_id，被动回复是 anchor**（`plugin.py:1419`），混用会让锁失效。
-11. **`proactive:*` 不是 QQ 消息号**，`set_reply` 必须置假（`plugin.py:1487-1489`），否则 NapCat 会编码出无效 reply 段。
-12. **无锚点发送不能误叫醒**（`plugin.py:1588-1590`），降级关联只在会话中恰有一个候选时发生。
-13. **`_append_item_text` 的 `item_id` 必须唯一、`timestamp` 必须可被 `fromisoformat` 解析**（`plugin.py:1177-1180`），写错直接让 Planner 请求失败。
+9. **`on_receive` 总预算 30 秒**（`plugin.py:938`），防抖等待 + 闸门 LLM + 生活分享判定 3.2s 都在里面。
+10. **主动任务的轮次锁锚点是 task_id，被动回复是 anchor**（`plugin.py:1421`），混用会让锁失效。
+11. **`proactive:*` 不是 QQ 消息号**，`set_reply` 必须置假（`plugin.py:1489-1491`），否则 NapCat 会编码出无效 reply 段。
+12. **无锚点发送不能误叫醒**（`plugin.py:1590-1592`），降级关联只在会话中恰有一个候选时发生。
+13. **`_append_item_text` 的 `item_id` 必须唯一、`timestamp` 必须可被 `fromisoformat` 解析**（`plugin.py:1179-1182`），写错直接让 Planner 请求失败。
 14. **`on_send_after` 是 OBSERVE 模式**，异常不阻断发送但会让结算丢失。
 15. **改 `rest_gate.force_wake_terms` 会同时改防抖立即结算行为**（`messaging/message_pipeline.py:328-329`）。
 
@@ -2495,10 +2496,10 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 
 ### 5.18 未确认
 
-- **Host 对合并后 `is_command=True` 消息的派发行为**。`_merge` 会把任一段是命令的合并轮标记为 `is_command`（`messaging/message_pipeline.py:260-264`），插件自身的路由决策却早在 `plugin.py:1051` / `plugin.py:981` 基于首条消息做出。合并消息带 `is_command=True` 交回 Host 后，Host 是否会改走命令派发路径，取决于 Host 实现，本仓库内无法确认。
-- **`on_send_after` 中 `reply_message_id` 缺失的降级关联**在真实 Host 上的触发频率。`plugin.py:1553-1556` 的兜底是否存在、命中率多少，只有线上日志能回答。
+- **Host 对合并后 `is_command=True` 消息的派发行为**。`_merge` 会把任一段是命令的合并轮标记为 `is_command`（`messaging/message_pipeline.py:260-264`），插件自身的路由决策却早在 `plugin.py:1053` / `plugin.py:983` 基于首条消息做出。合并消息带 `is_command=True` 交回 Host 后，Host 是否会改走命令派发路径，取决于 Host 实现，本仓库内无法确认。
+- **`on_send_after` 中 `reply_message_id` 缺失的降级关联**在真实 Host 上的触发频率。`plugin.py:1555-1558` 的兜底是否存在、命中率多少，只有线上日志能回答。
 - **`messaging/__pycache__/vision_service.cpython-313.pyc` 对应的 `vision_service` 源文件不存在**（本会话已核实该 pyc 在仓库内、对应 `.py` 不在）。`messaging/` 目录下只有 10 个 `.py` 文件（已全部通读），但这个 pyc 说明曾有（或曾有计划有）一个 `vision_service` 模块。它是否被移除、是否还有引用，本仓库内查不到——`grep -rn "vision_service" --include=*.py` 无命中。若文档读者需要 VLM/视觉链路，需另行确认。
-- **`GroupObserver` / `RelayService` 与消息链的交互细节**。本章只在必要处引用（`plugin.py:1033-1038` 群观察、`plugin.py:1271-1272` 转述边界、`plugin.py:1525-1533` relay 发送改写），两者的完整实现分别在 `social/group_observer.py` 与 `social/relay_service.py`，详见 §8.6。
+- **`GroupObserver` / `RelayService` 与消息链的交互细节**。本章只在必要处引用（`plugin.py:1035-1040` 群观察、`plugin.py:1273-1274` 转述边界、`plugin.py:1527-1535` relay 发送改写），两者的完整实现分别在 `social/group_observer.py` 与 `social/relay_service.py`，详见 §8.6。
 - **`PluginConfigBase` / `_ui` 的具体行为**（`config.py` 顶部），本章只引用字段默认值，未读基类实现（见 §2.1.3、§2.2）。
 
 ---
@@ -2523,12 +2524,12 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 
 | 入口 | 调用点 | 触发方式 |
 | --- | --- | --- |
-| `observe_message` | `plugin.py:1088` | 每条被动私聊消息后以 transient task 异步 spawn，**不阻塞当前回复** |
-| `ContinuityService.refresh` | `plugin.py:1086` | 同上，与来源消息绑定以支持撤回取消 |
-| `ensure_daily` | `plugin.py:489` | 维护 tick 内串行调用 |
-| `ProactiveEngine.patrol` | `plugin.py:435` | `_proactive_loop`，间隔 `proactive.patrol_interval_minutes`（默认 10 分钟，`config.py:1106`） |
-| `schedule_context` | `plugin.py:408` / `plugin.py:475` / `plugin.py:2027` | 每日日程生成循环、维护 tick、`/麦麦重生日程` |
-| `context_for_user` | `plugin.py:1150` | `_prompt_payload`（`plugin.py:1127`），即每次 Planner/Replyer 请求前 |
+| `observe_message` | `plugin.py:1090` | 每条被动私聊消息后以 transient task 异步 spawn，**不阻塞当前回复** |
+| `ContinuityService.refresh` | `plugin.py:1088` | 同上，与来源消息绑定以支持撤回取消 |
+| `ensure_daily` | `plugin.py:491` | 维护 tick 内串行调用 |
+| `ProactiveEngine.patrol` | `plugin.py:437` | `_proactive_loop`，间隔 `proactive.patrol_interval_minutes`（默认 10 分钟，`config.py:1106`） |
+| `schedule_context` | `plugin.py:410` / `plugin.py:477` / `plugin.py:2072` | 每日日程生成循环、维护 tick、`/麦麦重生日程` |
+| `context_for_user` | `plugin.py:1152` | `_prompt_payload`（`plugin.py:1129`），即每次 Planner/Replyer 请求前 |
 
 **为什么这样设计**：日期提取和连续性整理都走「fire-and-forget transient task」，因为它们是增强而非关键路径——模型慢或失败都不该让用户等回复。代价是异常只能进日志，调用方拿不到结果，排查时要盯 `[MaiLife]` 前缀的 error 日志而不是返回值。
 
@@ -2634,7 +2635,7 @@ occurrence(2000-02-29, annual) from 2028-02-28 = 2028-02-29
 梦境生成不在 `life/memory_service.py`，而在 `life/life_state.py:216` 的 `LifeStateEngine.generate_dream`；双门（资格门→周上限门→概率门）、兜底池、LLM 素材与 12 小时过期锚点的完整机制见 §4.4。本章只讲它产生之后被谁消费：
 
 - **进日记**：`_generate_diary` 读 `dreams_between(start, end)`（`life/memory_service.py:185`），`content` 与 `fragments` 都进 prompt。
-- **进提示词**：`_prompt_payload` 里 `"dream": await self._store.latest_dream()`（`plugin.py:1146`）→ Planner 背景的「梦境余韵」一行（`messaging/prompt_builder.py:149`）。
+- **进提示词**：`_prompt_payload` 里 `"dream": await self._store.latest_dream()`（`plugin.py:1148`）→ Planner 背景的「梦境余韵」一行（`messaging/prompt_builder.py:149`）。
 - **进主动契机**：`dream-{id}` 契机 `privacy="normal"`、`weight=0.46`（`life/life_state.py:251-252`），由 `patrol` 评分消费。
 
 群聊观察话题只作为梦境的「模糊参考」注入，且提示词明确要求不逐字复述、不暴露群友身份（`life/life_state.py:224-229`）。做梦门在「午休被叫醒后回睡超过 3 小时」场景下的 nap 排除绕过效应见 §4.4 坑位。
@@ -2728,7 +2729,7 @@ weight .90 + energy50 + temp30 + 活跃时段 + 积压 -> 1.1633   （过）
 - v1.7 起每日额度**只从该 QQ 用户档案取**，`max(0, min(20, ...))` 夹紧，不再继承全局上限（`life/proactive.py:72-73`）。值为 0 的用户永远走 `daily_limit` 跳过。
 - 计数按自然日：`user.proactive_day == day` 才读 `proactive_count`，否则按 0 起算（`life/proactive.py:71`）。
 
-**额度只在真正发送成功后累加**：`mark_pending_sent`（`core/storage.py:1078-1125`）里 `proactive_count = proactive_count + 1`，跨天则重置为 1（`core/storage.py:1114-1116`）。调用点在 `plugin.py:1574`，由平台确认发送成功后触发。
+**额度只在真正发送成功后累加**：`mark_pending_sent`（`core/storage.py:1078-1125`）里 `proactive_count = proactive_count + 1`，跨天则重置为 1（`core/storage.py:1114-1116`）。调用点在 `plugin.py:1576`，由平台确认发送成功后触发。
 
 它**不要求 `status='pending'`**，只要 `sent_at=0` 就按实际发送结果结算——因为发送确认可能跨过 120 秒过期边界，而此时事件已被 `expire_pending` 标成 `expired`。`sent_at=0` 同时保证幂等：同一事件不会重复累计额度。
 
@@ -2745,7 +2746,7 @@ weight .90 + energy50 + temp30 + 活跃时段 + 积压 -> 1.1633   （过）
 
 `day` 由调用方按配置时区算好传入（`life/proactive.py:42`：`now.strftime("%Y-%m-%d")`，注释说明是为避免服务器时区不同导致落错日期桶）；storage 侧 `day` 留空才退回 `time.localtime(now)`（`core/storage.py:1185`）。
 
-查看入口：WebUI「系统与配置」页主动候选段 → `proactive_skip_summary(since_day, 50)`（`plugin.py:2539`），按 reason 聚合总数与涉及用户数。
+查看入口：WebUI「系统与配置」页主动候选段 → `proactive_skip_summary(since_day, 50)`（`plugin.py:2584`），按 reason 聚合总数与涉及用户数。
 
 **诊断「主动发言偏低」的正确顺序**：先看统计里有没有数、是哪种 reason，再决定调什么。
 
@@ -2772,7 +2773,7 @@ LLM 可用            -> intent='约时间'，topics=['周末去哪','论文题�
 无近期互动的用户      -> intent=当前意图，topics=[]
 ```
 
-**时效裁剪在读取侧而非写入侧**：`_prompt_payload` 里若 `continuity.updated_at` 距今超过 14 天，注入前把 `unresolved_topics` 清空（`plugin.py:1136-1139`）——数据库里的旧话题仍在，只是不作为「未完话题」注入。
+**时效裁剪在读取侧而非写入侧**：`_prompt_payload` 里若 `continuity.updated_at` 距今超过 14 天，注入前把 `unresolved_topics` 清空（`plugin.py:1138-1141`）——数据库里的旧话题仍在，只是不作为「未完话题」注入。
 
 **与 MaiBot 长期记忆的边界**：`life/continuity.py:1` 的模块 docstring 写明「轻量连续话题元数据，不替代 MaiBot 自身长期记忆」。它只存 intent + 最多 5 条话题字符串，不存聊天记录。
 
@@ -2781,14 +2782,14 @@ LLM 可用            -> intent='约时间'，topics=['周末去哪','论文题�
 完整链路（两处注入，同一份 payload）：
 
 ```
-_prompt_payload (plugin.py:1127)
-  ├─ "memory":     await self._memory.context_for_user(user, now)   plugin.py:1150
-  ├─ "continuity": await self._store.get_continuity(user["user_id"]) plugin.py:1136
-  ├─ "dream":      await self._store.latest_dream()                  plugin.py:1146
+_prompt_payload (plugin.py:1129)
+  ├─ "memory":     await self._memory.context_for_user(user, now)   plugin.py:1152
+  ├─ "continuity": await self._store.get_continuity(user["user_id"]) plugin.py:1138
+  ├─ "dream":      await self._store.latest_dream()                  plugin.py:1148
   └─ "backlogs" / "information" / "bookshelf" / "bedtime" ...
 
-on_planner  -> PromptBuilder.planner(...)   plugin.py:1248  （上限 context.prompt_max_chars，默认 4000）
-on_replyer  -> PromptBuilder.replyer(...)   plugin.py:1299  （上限 min(2400, prompt_max_chars)）
+on_planner  -> PromptBuilder.planner(...)   plugin.py:1250  （上限 context.prompt_max_chars，默认 4000）
+on_replyer  -> PromptBuilder.replyer(...)   plugin.py:1301  （上限 min(2400, prompt_max_chars)）
 ```
 
 **角色裁剪的源头在 `context_for_user`**（`life/memory_service.py:256-266`），不在提示词层：
@@ -2810,7 +2811,7 @@ owner : 近期重要日期 "生日 2026-07-20（5天后）"；日记余韵 "2026
 friend: 近期重要日期 "无"；日记余韵 "当前关系无权读取私人日记"。
 ```
 
-**全局日程侧是另一条独立链路**：`schedule_context`（`life/memory_service.py:268-276`）只输出 `{"kind": ..., "days": ...}`，窗口 `0 <= days <= 30`，最多 8 条，**刻意不带 `user_id` 和事件原文**（`life/memory_service.py:273` 注释：避免共享生活线泄露朋友隐私）。它经 `plugin.py:408` / `plugin.py:475` / `plugin.py:2027` 传给 `_schedule.ensure_day(..., memory_context=...)`，由 `_apply_memory_hints`（`life/schedule_service.py:143-152`）把第一个 `leisure` 节点摘要改写为「…，也为临近的重要安排做些准备」并重算节点 id。
+**全局日程侧是另一条独立链路**：`schedule_context`（`life/memory_service.py:268-276`）只输出 `{"kind": ..., "days": ...}`，窗口 `0 <= days <= 30`，最多 8 条，**刻意不带 `user_id` 和事件原文**（`life/memory_service.py:273` 注释：避免共享生活线泄露朋友隐私）。它经 `plugin.py:410` / `plugin.py:477` / `plugin.py:2072` 传给 `_schedule.ensure_day(..., memory_context=...)`，由 `_apply_memory_hints`（`life/schedule_service.py:143-152`）把第一个 `leisure` 节点摘要改写为「…，也为临近的重要安排做些准备」并重算节点 id。
 
 两条链路的窗口不同（45 天 vs 30 天）是有意的：面向用户的提醒可以更早，塞进共享日程的提示更保守。
 
@@ -2885,8 +2886,8 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 三个对外入口：
 
-- **Tool**：`plugin.py:1624` 的 `mai_life_web_search`（`freshness` 参数枚举 `any/day/week/month/year`，`plugin.py:1642`）与 `plugin.py:1662` 的 `mai_life_browse_web`，都转调 `InformationService.search_for_tool` / `browse_screenshot`（`information/information_service.py:47`、`:108`）。
-- **定时 tick**：`plugin.py:452` 调用 `InformationService.tick`（`information/information_service.py:112`），内部依次跑新闻、自我关联、探索搜索，末尾 `cleanup_information` 清过期数据。
+- **Tool 3 个**：`plugin.py:1638` 的 `mai_life_web_search`（`freshness` 参数枚举 `any/day/week/month/year`，`plugin.py:1655`）、`plugin.py:1676` 的 `mai_life_browse_web`（转调 `browse_screenshot`），均转调 `InformationService`（`information/information_service.py:47`、`:108`）；`plugin.py:1744` 的 `mai_life_get_schedule` 仅群聊可见（`chat_scope="group"`），转调 `ScheduleService.context`（`life/schedule_service.py:357`）取今日框架、当前段与当前场景。
+- **定时 tick**：`plugin.py:454` 调用 `InformationService.tick`（`information/information_service.py:112`），内部依次跑新闻、自我关联、探索搜索，末尾 `cleanup_information` 清过期数据。
 - **WebUI/管理端**：`InformationService.status` / `provider_health`（`information/information_service.py:286`、`:284`）读 `SearchService.health_snapshot`（`information/search_service.py:399`）。
 
 总开关链：`information.enabled` → 各子开关（`news.enabled` / `search.enabled` / `search_api.tool_enabled`）→ 至少一个 `enabled` 且健康的 Provider，三层全部打开才真正发起外部请求（`config.py:619`、`config.py:719`、`config.py:739`、`config.py:704`）。
@@ -3051,7 +3052,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 **为什么 OpenAI 路线用提示词降级**：Responses/Chat 的 `web_search` 工具没有 freshness 参数，只能把"只返回最近 N 天内"写进 instructions/system（`information/search_service.py:32` 注释），至少覆盖 day 档；约束强度依赖模型遵守，效果弱于前四种服务端过滤——未确认各中转的实际遵守率。
 
-内部调用方的档位选择：新闻恒 `day`（`information/news_service.py:44`）；主动探索不传 freshness（`information/information_service.py:234`）；Tool 由模型经 `mai_life_web_search` 的 `freshness` 参数选择（`plugin.py:1642`）。
+内部调用方的档位选择：新闻恒 `day`（`information/news_service.py:44`）；主动探索不传 freshness（`information/information_service.py:234`）；Tool 由模型经 `mai_life_web_search` 的 `freshness` 参数选择（`plugin.py:1644`）。
 
 ### 7.7 新闻抓取与入库过滤
 
@@ -3137,7 +3138,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 | 配置 | `config.py` | `CreationSettings`（368-446 行）、`SocialSettings`（321-365 行）、`SocialGroupProfile`（284-316 行）、休息闸门群字段（835-879 行） |
 | 入口 | `plugin.py` | 服务装配（284-287 行）、创作巡检循环（456-466 行）、群观察 Hook（1033-1038 行）、命令（1919-1976 行）、WebUI API（2350 行起） |
 
-两个模块都是**默认关闭**的功能：`creation.enabled` 与 `social.enabled` 默认 `False`（`config.py:374`、`config.py:327`）。创建在 `on_load` 装配但后台循环关闭时只空转（`plugin.py:459-461`）。
+两个模块都是**默认关闭**的功能：`creation.enabled` 与 `social.enabled` 默认 `False`（`config.py:374`、`config.py:327`）。创建在 `on_load` 装配但后台循环关闭时只空转（`plugin.py:461-463`）。
 
 ### 8.2 数据模型：文档 + 不可变修订 + 运行记录
 
@@ -3156,7 +3157,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 1. 书柜列表只显示 `status='archived'` 的文档（`core/storage.py:1880`），`inspiration/outline/draft` 状态的文档在书柜页不可见；续写中间修订一律 `set_current=False` 就是为了让书全程保持 `archived`、不从书柜消失（`creation/creation_service.py:179-180`）。
 2. 日记是 v1.5 起以 `INSERT OR IGNORE` 回填进书柜的投影（`core/storage.py:484-496`），新建日记时也在同一事务里双写（`core/storage.py:2090-2114`）。改日记表不同步书柜会出现"日记在、书柜没有"的漂移；且这次回填是 DML，后面必须显式 `commit`，否则嵌套事务会触发 `initialize()` 误判并替换整个用户库（`core/storage.py:497-501` 的注释记录了 v9/v10→v11 的真实事故）。
 3. `get_bookshelf_document` 对 private 文档在 `allow_private=False` 时返回 `{}` 而不是抛错（`core/storage.py:1894`），调用方必须把"空 dict"当作"不存在或无权限"两种含义处理。
-4. `management_bookshelf`（管理摘要）刻意不返回正文与修订（`core/storage.py:1949-1957`），而 WebUI 的 `webui_bookshelf_overview` 是主人专属、返回全量正文（`plugin.py:2360-2364`）——两处可见性口径不同，改任一处都要意识到另一处的存在。
+4. `management_bookshelf`（管理摘要）刻意不返回正文与修订（`core/storage.py:1949-1957`），而 WebUI 的 `webui_bookshelf_overview` 是主人专属、返回全量正文（`plugin.py:2405-2409`）——两处可见性口径不同，改任一处都要意识到另一处的存在。
 
 ### 8.3 四阶段创作流水线（提纲/草稿/审校/终稿）
 
@@ -3164,8 +3165,8 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 两个入口共用一个 `CreationService` 实例和一把 `asyncio.Lock`：
 
-- 后台巡检 `_creation_loop`：每 `patrol_interval_minutes`（默认 60 分钟）tick 一次（`plugin.py:456-466`）。
-- 管理员命令 `/麦麦立即创作`：`tick(..., force=True)`（`plugin.py:1954-1964`）。
+- 后台巡检 `_creation_loop`：每 `patrol_interval_minutes`（默认 60 分钟）tick 一次（`plugin.py:458-468`）。
+- 管理员命令 `/麦麦立即创作`：`tick(..., force=True)`（`plugin.py:1999-2009`）。
 
 `tick` 先取锁、首次执行时调用 `recover_creation_claims` 做崩溃恢复，再进入 `_tick_locked`（`creation/creation_service.py:50-55`）。锁的关键作用：后台巡检与管理员命令并发时不会重复消费同一份灵感、不会突破每日额度（`creation/creation_service.py:51-52`；测试 `tests/test_creation.py:145-155` 用两个并发 tick 验证只有一个 `archived`）。
 
@@ -3268,7 +3269,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 #### 群观察 GroupObserver
 
-入口是群消息防抖收口后的 Hook：`plugin.py:1033-1038` 把合并后的消息 spawn 给 `observe`（观察消费的是防抖后的最终消息，同时保留自己的后台话题收集窗口）。
+入口是群消息防抖收口后的 Hook：`plugin.py:1035-1040` 把合并后的消息 spawn 给 `observe`（观察消费的是防抖后的最终消息，同时保留自己的后台话题收集窗口）。
 
 `observe`（`social/group_observer.py:72-120`）的流水线：
 
@@ -3303,11 +3304,11 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 产物：`relay_candidates` 一条 `kind="group_to_private"`（relay_id `grp-…`，2 小时过期）+ `proactive_opportunities` 一条（`privacy="group_public"`，权重 `min(0.85, max(0.7, score))`——刻意高于日常场景契机，避免被普通日程挤占；`reason` 固定声明"不得转述群友身份、原句或群聊隐私"）（`social/group_observer.py:222-242`）。
 
-**容易踩的坑**：观察侧的静音窗判断 `_group_quiet_now` 只读 `rest_gate.group_enabled` 与四个时间字段，**不读** `group_mode`、`group_gate_segment_types` 和每群的 `rest_gate_enabled`——后者只影响回复闸门（`life/rest_gate.py:79-108`）。也就是说 `group_mode="selected"` 且没有任何群打开"夜间静音"时，群观察在时间窗内依旧暂停。这是读码所见的行为，设计意图**未确认**（观察侧 docstring 只解释"夜间无 Planner 消费这些摘要"）。
+**容易踩的坑**：观察侧的静音窗判断 `_group_quiet_now` 只读 `rest_gate.group_enabled` 与四个时间字段，**不读** `group_mode`、`group_gate_segment_types` 和每群的 `rest_gate_enabled`——后者只影响回复闸门（`life/rest_gate.py:79-126`）。也就是说 `group_mode="selected"` 且没有任何群打开"夜间静音"时，群观察在时间窗内依旧暂停。这是读码所见的行为，设计意图**未确认**（观察侧 docstring 只解释"夜间无 Planner 消费这些摘要"）。
 
 #### 显式转述 RelayService
 
-`/麦麦转述 <QQ群号> <内容>`（`plugin.py:1966-1976`）→ `trigger_explicit`（`social/relay_service.py:77-123`）：
+`/麦麦转述 <QQ群号> <内容>`（`plugin.py:2011-2021`）→ `trigger_explicit`（`social/relay_service.py:77-123`）：
 
 1. `social.enabled`、睡眠相位检查（`falling_asleep/light_sleep/deep_sleep` 拒绝）（`social/relay_service.py:79-83`）。
 2. 群白名单：`resolve_group` 按**精确 QQ 群号**匹配且要求 `relay_target_enabled`，按群名匹配一律拒绝（`social/relay_service.py:24-30`；测试 `tests/test_social.py:121-124`）。
@@ -3324,7 +3325,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 - **为什么不能按 `archived_at` 计数**：续写只是把同一文档的 `archived_at` 刷新到当天，按文档计数从第二章起不再增长，`min_gap_days=0` 时每日上限形同虚设（`core/storage.py:1773-1776` 注释）。
 - **失败不花额度**：只有落库 `final` 修订才算数；审校拒绝、异常、取消都不会产生 `final`（`creation/creation_service.py:192-196`；测试 `tests/test_creation.py:205-212`、`520-536`）。
 - **恢复不花额度**：`recover_creation_claims` 把有 `final` 的文档恢复 `archived` 时刻意不刷新 `archived_at/updated_at`（`core/storage.py:1744-1746`）。
-- 检查时机在灵感抢占之前（`creation/creation_service.py:70`），且 `force=True` 的管理员命令同样受限（`plugin.py:1961-1963`）。
+- 检查时机在灵感抢占之前（`creation/creation_service.py:70`），且 `force=True` 的管理员命令同样受限（`plugin.py:2006-2008`）。
 - 群转私是另一套额度：`group_share_daily_max`（每用户每日候选数，按 `queued/sent` 计）+ `group_share_min_interval_minutes`（`social/group_observer.py:215-217`、`core/storage.py:1698-1705`），与创作的 `daily_max` 互不影响。
 
 ### 8.8 设计动机与坑速查
@@ -3362,7 +3363,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 - **聊天内聚合命令（v1.23.0 起已移除）**：`/麦麦管理`（别名 `/mai_admin`）原由 `management/admin_service.py` 的 `AdminService` 产出脱敏文本、走 `@Command` 通道；命令精简后服务层保留，生产消费者只剩 WebUI 与私有 API；
 - **WebUI 后台**：插件目录下的声明式 `webui.json`（7 页）+ `plugin.py` 里 11 个 `public=False` 的 `@API` 只读数据源，由宿主 dashboard 渲染。
 
-WebUI 页面与私有 API 唯一的共享代码是 `AdminService.snapshot()`：`webui_admin_summary` 复用它取概览/群组/来源三段（`plugin.py:2509-2529`），私有 API `admin_snapshot` 也复用它（`plugin.py:1995`）。改 `AdminService` 的输出等于同时改这两个出口，这是本章最重要的耦合点。
+WebUI 页面与私有 API 唯一的共享代码是 `AdminService.snapshot()`：`webui_admin_summary` 复用它取概览/群组/来源三段（`plugin.py:2554-2574`），私有 API `admin_snapshot` 也复用它（`plugin.py:2040`）。改 `AdminService` 的输出等于同时改这两个出口，这是本章最重要的耦合点。
 
 ### 9.2 管理服务 AdminService 与聚合命令
 
@@ -3370,7 +3371,7 @@ WebUI 页面与私有 API 唯一的共享代码是 `AdminService.snapshot()`：`
 
 `management/` 只有两个文件：`__init__.py` 导出 `AdminService`（`management/__init__.py:1-5`），实体全在 `management/admin_service.py`（197 行）。模块 docstring 即设计目标：「不暴露聊天原文和原始 API Key 的结构化管理摘要」（`management/admin_service.py:1`）。
 
-`AdminService` 是无状态的聚合层：`__init__` 只持有 `store` 与 `config` 两个引用（`management/admin_service.py:48`），`update_config` 在配置热更新时替换 config 实例（`management/admin_service.py:49`）。它在 `on_load` 中创建（`plugin.py:288`），并在 `on_config_update` 的 `scope=="self"` 分支随其余服务一起收到新配置（`plugin.py:345-349`）。
+`AdminService` 是无状态的聚合层：`__init__` 只持有 `store` 与 `config` 两个引用（`management/admin_service.py:48`），`update_config` 在配置热更新时替换 config 实例（`management/admin_service.py:49`）。它在 `on_load` 中创建（`plugin.py:290`），并在 `on_config_update` 的 `scope=="self"` 分支随其余服务一起收到新配置（`plugin.py:347-351`）。
 
 #### 九个 scope 与两条出口
 
@@ -3380,7 +3381,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 
 | 出口 | 入口 | 默认 limit | 说明 |
 |---|---|---|---|
-| `snapshot()` | 私有 API `admin_snapshot`（`plugin.py:2177-2182`） | 20 | 保留给 Host 鉴权桥或插件自身，注释明确「不作为其他插件可调用的公共 API」（`plugin.py:2179`） |
+| `snapshot()` | 私有 API `admin_snapshot`（`plugin.py:2222-2227`） | 20 | 保留给 Host 鉴权桥或插件自身，注释明确「不作为其他插件可调用的公共 API」（`plugin.py:2224`） |
 | `format_text()` | 原命令 `/麦麦管理`（v1.23.0 已移除） | 12 | 把各 scope 渲染成可复制纯文本（`management/admin_service.py:131-197`）；命令移除后仅剩测试守卫消费 |
 
 各 scope 的数据来源与脱敏层次：
@@ -3408,7 +3409,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 
 #### 聚合命令 `/麦麦管理`（v1.23.0 已移除）
 
-命令已于 v1.23.0 移除（原注册于 `plugin.py:1985`，改动前快照）：pattern 同时接受中文 scope 与旧英文 scope，经 `ADMIN_SCOPE_ALIASES` 归一化（别名表与中文映射测试随命令一同删除）。访问控制是双闸：`_command_access` 要求**私聊**且是已启用用户或显式管理员，群聊始终拒绝（`plugin.py:1724`）；`_is_owner_or_admin` 再要求 owner 角色或 `admin_user_ids` 命中（`plugin.py:1710`）。`admin_user_ids` 为空时回落取第一个启用 profile（`plugin.py:1705-1707`）——冷启动没配管理员时行为要知道。被拒提示带 `ADMIN_IDS_HINT` 引导补管理员（`plugin.py:44`）。
+命令已于 v1.23.0 移除（原注册于 `plugin.py:2030`，改动前快照）：pattern 同时接受中文 scope 与旧英文 scope，经 `ADMIN_SCOPE_ALIASES` 归一化（别名表与中文映射测试随命令一同删除）。访问控制是双闸：`_command_access` 要求**私聊**且是已启用用户或显式管理员，群聊始终拒绝（`plugin.py:1769`）；`_is_owner_or_admin` 再要求 owner 角色或 `admin_user_ids` 命中（`plugin.py:1712`）。`admin_user_ids` 为空时回落取第一个启用 profile（`plugin.py:1707-1709`）——冷启动没配管理员时行为要知道。被拒提示带 `ADMIN_IDS_HINT` 引导补管理员（`plugin.py:44`）。
 
 指令精简后 `format_text()` 失去命令入口、仅剩测试守卫消费（`tests/test_fixes.py`、`tests/test_management.py`）；scope 白名单与 `snapshot()` 仍由 WebUI「系统与配置」页和私有 API `admin_snapshot` 消费（§9.1）。`format_text` 的分 scope 排版有几个刻意的产品决策，改文本时别破坏：
 
@@ -3452,7 +3453,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 
 ### 9.4 11 个只读 API 的契约要点
 
-11 个 API 全部 `@API(name="webui_*", version="1", public=False)`，集中在 `plugin.py:2190-2744`。公共契约（`plugin.py:2184-2188` 注释原文归纳）：
+11 个 API 全部 `@API(name="webui_*", version="1", public=False)`，集中在 `plugin.py:2235-2789`。公共契约（`plugin.py:2229-2233` 注释原文归纳）：
 
 - 纯本地聚合，无 LLM/网络调用，远低于 10 秒超时；
 - 响应键与契约逐字一致，列表与文本全部限量，远低于 512 KiB；
@@ -3464,19 +3465,19 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 
 | API | 行号 | 契约要点 |
 |---|---|---|
-| `webui_status_overview` | `plugin.py:2190` | 七段：`state`/`schedule`/`sleep`/`linkage`/`services`/`recall` + 天气节日。可空嵌套对象一律**键齐全的空字典**而非 null——`_node_view` 对空节点返回 7 个空键（`kind`/`kind_zh`/`summary`/`location`/`start`/`end`/`window`，`plugin.py:122`；函数与设计注释见 `plugin.py:116-127`，注释明言「解析 null 嵌套路径会直接抛错，整页显示数据与组件声明不一致」），`schedule.next`/`scene`、`recall.latest` 同样处理（`plugin.py:2227`、`:2230`、`:2264`）。`services` 段带 `narrative_note`：叙事任务（dream/diary/creation_body）无可用模型时明确告知是占位内容（`plugin.py:2207-2210`） |
-| `webui_status_history` | `plugin.py:2269` | 近 72 小时 `points[{ts,time,energy,hunger,mood_valence,mood_arousal,sleep_phase}]`。**按 2 小时网格重采样**：渲染器是类别轴（等宽分格），稀疏快照会让 1 小时与 9 小时间隔一样宽，时间轴就是假的；网格点取该时刻最近一次快照，起点=最早一条快照，不虚构更早历史（`plugin.py:2276-2292`）。**图表 x 轴必须绑 `time`（MM-DD HH:MM）而不是 `ts`**（`docs/webui-extension.md:126`） |
-| `webui_information_digest` | `plugin.py:2297` | `status` 三开关 + 计数；`news` ≤10 带 `url`+`content` 全文、`explorations` ≤10 带 `query`+`sources_text`、`search_history` ≤20 带 `error_class`+`results_digest`（`_search_results_digest` 拼多行文本，`plugin.py:137-150`）。两类 `*_full_text` 用 `_FULL_TEXT_SEP`（`plugin.py:134`，分隔线字符串）拼接供全文 tab 连读。providers/Key 健康不在本 API，由 `webui_admin_summary` 提供（`plugin.py:2336` 注释） |
-| `webui_bookshelf_overview` | `plugin.py:2350` | `counts`/`creation`/`books` ≤20（`allow_private=True`，主人可见私人）+ `books_full_text`；`runs` 取 50 与宿主 table 每页 50 行对齐（`plugin.py:2358-2359` 注释）；`latest_work` 无数据时返回键齐全空字典（`plugin.py:2386`） |
-| `webui_schedule` | `plugin.py:2390` | 今日 `nodes` + `current`/`next`/`scene` + `tomorrow`。场景按 `framework_id` 关联而非按 start_minute 位置合并——同一 start_minute 多节点按位置合并会互相覆盖（`plugin.py:2397-2398` 注释） |
-| `webui_users` | `plugin.py:2428` | `list_users(include_disabled=True)` 全量（含禁用，注释：「禁用用户的关系与额度同样要能诊断」），按最近发言排序后截 50（`plugin.py:2435-2438`）；每人附 `recent` 最近互动 60 字。`counts` 五字段 |
-| `webui_memories` | `plugin.py:2462` | 日记 ≤20 带 `content` + `diaries_full_text`；`latest_diary` 正文全量；梦境取 30 天窗口的**末尾 20 条**（`dreams_between` 升序，`plugin.py:2472`、`:2495-2496` 注释）；`latest_dream` 空数据键齐全（`plugin.py:2494`） |
-| `webui_dates` | `plugin.py:2504` | 正式日期按「下次发生」升序，无效日期（`days_left<0`）沉底（`plugin.py:2525-2526`）；`dates` ≤50、`candidates` ≤20；`countdown` 中文（`_countdown`，`plugin.py:107-113`） |
-| `webui_usage` | `plugin.py:2541` | 今日 `tokens`（source/task 聚合）+ `searches`；近 7 日 `daily` 用**累计值逐日 0 点差分**得出（`usage_summary(since)` 是累计语义，负值钳 0，末端边界取明天 0 点——`plugin.py:2560-2572` 注释）。这是本 API 最易改错的地方 |
-| `webui_config_summary` | `plugin.py:2583` | 配置各节的只读镜像：`plugin`/`users`/`models`/`environment`/`linkage`/`debounce`/`recall`/`context`/`rest_gate`/`memory`/`information`/`news`/`search`/`search_api`/`social`/`creation`/`schedule`/`proactive`/`usage`，共 **19 个顶层键**（本机按 `plugin.py:2588-2682` 的 return 字典逐键清点）；布尔走 `_switch`，浮点 round 2 位 |
-| `webui_admin_summary` | `plugin.py:2686` | `overview`/`groups`/`sources` 三段复用 `AdminService.snapshot`（`plugin.py:2692-2712`）；`proactive.candidates`/`skips` 与 `keys` **直连 store**（`plugin.py:2713-2722`、`:2736-2742`）——这条直连链路与 `AdminService` 是两份实现，改一处记得另一处。Key 只出指纹与运行态（`plugin.py:2723` 注释：「绝不出凭据」）。注意 `keys` 段的 `provider_id` 是 SearchService 口径，与 `sources.providers` 段 AdminService 口径的 `provider_id` 对不上——这是 §9.2 sources 段记录的同一隐患在 WebUI 侧的表现 |
+| `webui_status_overview` | `plugin.py:2235` | 七段：`state`/`schedule`/`sleep`/`linkage`/`services`/`recall` + 天气节日。可空嵌套对象一律**键齐全的空字典**而非 null——`_node_view` 对空节点返回 7 个空键（`kind`/`kind_zh`/`summary`/`location`/`start`/`end`/`window`，`plugin.py:122`；函数与设计注释见 `plugin.py:116-127`，注释明言「解析 null 嵌套路径会直接抛错，整页显示数据与组件声明不一致」），`schedule.next`/`scene`、`recall.latest` 同样处理（`plugin.py:2272`、`:2230`、`:2264`）。`services` 段带 `narrative_note`：叙事任务（dream/diary/creation_body）无可用模型时明确告知是占位内容（`plugin.py:2252-2255`） |
+| `webui_status_history` | `plugin.py:2314` | 近 72 小时 `points[{ts,time,energy,hunger,mood_valence,mood_arousal,sleep_phase}]`。**按 2 小时网格重采样**：渲染器是类别轴（等宽分格），稀疏快照会让 1 小时与 9 小时间隔一样宽，时间轴就是假的；网格点取该时刻最近一次快照，起点=最早一条快照，不虚构更早历史（`plugin.py:2321-2337`）。**图表 x 轴必须绑 `time`（MM-DD HH:MM）而不是 `ts`**（`docs/webui-extension.md:126`） |
+| `webui_information_digest` | `plugin.py:2342` | `status` 三开关 + 计数；`news` ≤10 带 `url`+`content` 全文、`explorations` ≤10 带 `query`+`sources_text`、`search_history` ≤20 带 `error_class`+`results_digest`（`_search_results_digest` 拼多行文本，`plugin.py:137-150`）。两类 `*_full_text` 用 `_FULL_TEXT_SEP`（`plugin.py:134`，分隔线字符串）拼接供全文 tab 连读。providers/Key 健康不在本 API，由 `webui_admin_summary` 提供（`plugin.py:2381` 注释） |
+| `webui_bookshelf_overview` | `plugin.py:2395` | `counts`/`creation`/`books` ≤20（`allow_private=True`，主人可见私人）+ `books_full_text`；`runs` 取 50 与宿主 table 每页 50 行对齐（`plugin.py:2403-2404` 注释）；`latest_work` 无数据时返回键齐全空字典（`plugin.py:2431`） |
+| `webui_schedule` | `plugin.py:2435` | 今日 `nodes` + `current`/`next`/`scene` + `tomorrow`。场景按 `framework_id` 关联而非按 start_minute 位置合并——同一 start_minute 多节点按位置合并会互相覆盖（`plugin.py:2442-2443` 注释） |
+| `webui_users` | `plugin.py:2473` | `list_users(include_disabled=True)` 全量（含禁用，注释：「禁用用户的关系与额度同样要能诊断」），按最近发言排序后截 50（`plugin.py:2480-2483`）；每人附 `recent` 最近互动 60 字。`counts` 五字段 |
+| `webui_memories` | `plugin.py:2507` | 日记 ≤20 带 `content` + `diaries_full_text`；`latest_diary` 正文全量；梦境取 30 天窗口的**末尾 20 条**（`dreams_between` 升序，`plugin.py:2517`、`:2495-2496` 注释）；`latest_dream` 空数据键齐全（`plugin.py:2539`） |
+| `webui_dates` | `plugin.py:2549` | 正式日期按「下次发生」升序，无效日期（`days_left<0`）沉底（`plugin.py:2570-2571`）；`dates` ≤50、`candidates` ≤20；`countdown` 中文（`_countdown`，`plugin.py:107-113`） |
+| `webui_usage` | `plugin.py:2586` | 今日 `tokens`（source/task 聚合）+ `searches`；近 7 日 `daily` 用**累计值逐日 0 点差分**得出（`usage_summary(since)` 是累计语义，负值钳 0，末端边界取明天 0 点——`plugin.py:2605-2617` 注释）。这是本 API 最易改错的地方 |
+| `webui_config_summary` | `plugin.py:2628` | 配置各节的只读镜像：`plugin`/`users`/`models`/`environment`/`linkage`/`debounce`/`recall`/`context`/`rest_gate`/`memory`/`information`/`news`/`search`/`search_api`/`social`/`creation`/`schedule`/`proactive`/`usage`，共 **19 个顶层键**（本机按 `plugin.py:2633-2727` 的 return 字典逐键清点）；布尔走 `_switch`，浮点 round 2 位 |
+| `webui_admin_summary` | `plugin.py:2731` | `overview`/`groups`/`sources` 三段复用 `AdminService.snapshot`（`plugin.py:2737-2757`）；`proactive.candidates`/`skips` 与 `keys` **直连 store**（`plugin.py:2758-2767`、`:2736-2742`）——这条直连链路与 `AdminService` 是两份实现，改一处记得另一处。Key 只出指纹与运行态（`plugin.py:2768` 注释：「绝不出凭据」）。注意 `keys` 段的 `provider_id` 是 SearchService 口径，与 `sources.providers` 段 AdminService 口径的 `provider_id` 对不上——这是 §9.2 sources 段记录的同一隐患在 WebUI 侧的表现 |
 
-注意 `plugin.py:2185` 注释说「十二个私有 @API」：11 个 `webui_*` + `admin_snapshot`（`plugin.py:2177`）= 12，WebUI 只消费其中 11 个。
+注意 `plugin.py:2230` 注释说「十二个私有 @API」：11 个 `webui_*` + `admin_snapshot`（`plugin.py:2222`）= 12，WebUI 只消费其中 11 个。
 
 **回归网**（改 API 输出必跑，转引自 docs）：`tests/test_contract.py:216` `WebuiApiContractTests` + `tests/test_fixes.py` 的 `V11412Webui*` 系列共 15 个类（Overview/History/Digest/Bookshelf/Schedule/Users/Memories/Dates/Usage/ConfigSummary/AdminSummary/ErrorPath/JsonStructure/ApiRegistry/RendererBinding，`tests/test_fixes.py:3008-4890`）——字段集合、条数、格式断言逐字钉死；`V11412WebuiRendererBindingTests` 会用空库+种子库按渲染器同规则解析全部绑定（`docs/webui-extension.md:151`）。`tests/test_management.py:12` `ManagementTests` 守 `AdminService` 脱敏（书柜不返回正文/修订、错误摘要里的 URL 凭据也被洗掉：`tests/test_management.py:44-52`）。
 
@@ -3490,7 +3491,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 
 - **manifest 是插件的注册元数据**（`manifest_version: 2`，`_manifest.json:2`），`display.icon` 是其中一个**可选**字段——按 maibot-plugin-dev 技能的清单，必填字段里没有它，它与 `plugin_type`、`changelog` 同列「可选但常用」（外部技能文档 `~/.agents/skills/maibot-plugin-dev/SKILL.md:69`，非仓库文件；本会话未读宿主源码验证其解析逻辑，**未确认**）。
 - **它只影响宿主 chrome 里的插件形象**（插件列表/管理入口的图标）：`type:"local"` + `value:"mailife.png"` 表示图标文件在插件根目录、相对 `_manifest.json` 定位；`fallback:"fish"` 是本地图加载失败时的 lucide 兜底图标名；`background:"#BFE3F2"` 是图标底色。
-- **与 webui.json 无关**：页面图标走每页自己的 `icon` 字段，且被限制在 `puzzle/chart/settings/database/list` 五个枚举值内（`docs/webui-extension.md:32`）；首页卡片图标是另一套命名图标机制（`plugin.py:2754` 的 `icon="heart-pulse"`）。`webui.json` 全文不引用 `mailife.png`——实测 0 个 `image` 组件，麦麦头像不会出现在任何页面里。
+- **与 webui.json 无关**：页面图标走每页自己的 `icon` 字段，且被限制在 `puzzle/chart/settings/database/list` 五个枚举值内（`docs/webui-extension.md:32`）；首页卡片图标是另一套命名图标机制（`plugin.py:2799` 的 `icon="heart-pulse"`）。`webui.json` 全文不引用 `mailife.png`——实测 0 个 `image` 组件，麦麦头像不会出现在任何页面里。
 - 图标文件实测：PNG 签名合法，512×512、8 位、RGBA（color_type 6）、372348 字节 ≈ 363.6 KiB，画面是水蓝底色中的橙色胡萝卜形吉祥物（与 `background` 色一致）。`CHANGELOG.md:27-33` 记录 v1.22.1 新增该字段，并把图标从 1254×1254/1.7MB 压到 512×512/363KB 以降低插件列表加载开销——同一次变更还把 `plugin_type` 从 `tool` 改为 `extension`、把 `host_application.max_version` 从 `1.99.99` 收窄为 `1.3.99`（`_manifest.json:12-15`）。
 
 **容易踩的坑**：`value` 是相对路径，重命名/移动 `mailife.png` 而不改 manifest，图标会静默 fallback 到 `fish`；反过来在 `webui.json` 里手写 `<image>` 绑这个 PNG 是行不通的（协议 2 的 `image` 组件只接受数据引用且返回受限 data URL，`docs/webui-extension.md:60`）。
@@ -3519,19 +3520,19 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 **为什么这样设计**：
 
 - 管理命令与 WebUI 分离但共享 `AdminService.snapshot`：命令要纯文本、WebUI 要结构化，聚合+脱敏逻辑只有一份；WebUI 侧只有 `webui_admin_summary` 的 proactive/keys 两段绕开了它直连 store（为的是 keys 能带上 `failure_count` 等运行态），代价是两处实现可能漂移。
-- 全量原则：WebUI 后台仅主人可进，所以日记/梦境/作品/新闻/探索正文与 URL 全量输出、附 `*_full_text` 连读（`plugin.py:2303`、`:2361` 注释；`docs/webui-extension.md:121`）；**唯一例外是 API Key 只出指纹**——这是凭证卫生，与隐私无关（`docs/webui-extension.md:18`）。
+- 全量原则：WebUI 后台仅主人可进，所以日记/梦境/作品/新闻/探索正文与 URL 全量输出、附 `*_full_text` 连读（`plugin.py:2348`、`:2361` 注释；`docs/webui-extension.md:121`）；**唯一例外是 API Key 只出指纹**——这是凭证卫生，与隐私无关（`docs/webui-extension.md:18`）。
 - 「列表 tab 扫读 + 全文 tab 连读 + 行弹窗看单条」三层结构：三种阅读场景各管一段，`*_full_text` 同时服务全文 tab 与弹窗（`docs/webui-development.md:34`、`:68`）。
 
 **容易踩的坑（按改动频率排序）**：
 
 1. **渲染器硬规则**：绑定路径每层必须存在——可空嵌套对象一律返回键齐全的空字典（`plugin.py:116-127` 等五处）；`text`/`stat` 只绑标量，`table`/`chart` 绑对象数组，chart 的 `y` 必须有限数字；违反整页报错（`docs/webui-extension.md:86-97`）。
-2. **chart x 绑 `time` 不绑 `ts`**，且 history 已按 2 小时网格重采样，别在页面侧再按 `ts` 做时间轴假设（`plugin.py:2276-2292`）。
+2. **chart x 绑 `time` 不绑 `ts`**，且 history 已按 2 小时网格重采样，别在页面侧再按 `ts` 做时间轴假设（`plugin.py:2321-2337`）。
 3. **dialog 必须 content 顶层**、tabs 直接子节点的 `when` 不隐藏页签（`docs/webui-extension.md:95`、`:78`）。
 4. **协议 2 黑名单**：写 `repeat`/`gallery`/`upload`/`scope:"item"` 任一，宿主整插件注册拒绝（`docs/webui-extension.md:70`）。
 5. **system 页 185/200 组件**，只剩 15 个余量（`docs/webui-development.md:66`）。
 6. **`webui.json` 114.2 KiB / 128 KiB** 上限，大段全文塞进组件树前先算字节。
 7. **改 API 输出必须三同步**：`plugin.py` 方法 → 测试断言 → `docs/webui-extension.md` §6 契约表（`docs/webui-development.md:86-88`）。
-8. **`admin_snapshot` 是私有的**，`public=False`，别当跨插件 API 引用（`plugin.py:2179`）。
+8. **`admin_snapshot` 是私有的**，`public=False`，别当跨插件 API 引用（`plugin.py:2224`）。
 9. **管理 scope 拼错静默回落 overview**（`management/admin_service.py:52-53`），排查「数据不对」时先看是不是 scope 没匹配上（v1.23.0 起经 WebUI 与私有 API 传参）。
 10. **每插件并发 WebUI 请求 2、API 超时 10 秒、响应 ≤512 KiB**（`docs/webui-extension.md:111-113`）；11 个 API 全是纯本地聚合正是为了稳过超时。
 
@@ -3549,57 +3550,57 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 
 | # | 阶段 | 代码位置 | 关键动作 | 中止/失败时 |
 |---|---|---|---|---|
-| 1 | 入口收口 | `plugin.py:936` `on_receive` | 撤回通知优先（`plugin.py:944-950`）；停机/热重载/未就绪放行（`plugin.py:951`）；手滑命令回菜单并 abort（`plugin.py:954-965`）；`note_inbound` + `register_turn`（`plugin.py:967-969`） | 撤回通知 → `_handle_recall`（§10.3） |
-| 2 | 私聊管线前置 | `plugin.py:1043-1059` | `not uid or is_command` → abort/continue；`get_user` 未配置/未启用 → abort/continue；绑定 `stream_id` 与展示名 | 未配置用户不进任何增强 |
-| 3 | 防抖合并 | `plugin.py:1061` `MessageDebouncer.collect` | 连续补话合并成一条 `merged`；异常失败开放（`plugin.py:1061-1064`） | `allowed=False` → **必须 abort**（§5.3.5） |
-| 4 | 合并后登记 | `plugin.py:1071-1076` | 重取身份、`register_turn(merged)`、`_discard_recalled_private_turn` | 已撤回 → abort |
-| 5 | 互动与观察 | `plugin.py:1078-1090` | `record_interaction`（纯空消息不写）；spawn `continuity.refresh` 与 `memory.observe_message`（与来源消息绑定，支持撤回取消） | 后台任务异常只进日志 |
-| 6 | 休息闸门 | `plugin.py:1093` `RestGate.decide` | 时间窗 OR 日程类型触发；概率/LLM 判醒；建待醒候选（§4.7） | 阻断 → 非 `BLOCK_REASON` 写 `rest_backlogs` 后 abort |
-| 7 | 运行态落账 | `plugin.py:1117-1131` | `_detect_moment_signal`（3.2s 预算，§11.5）；写 `_session_runtime`；`_cancel_reply_confirmations`；`note_inbound` + `_supersede_active_task`（真实入站优先于未发送的主动轮） | 命令/阻断/未配置用户不写 |
-| 8 | Planner 注入 | `plugin.py:1237` `on_planner` | `_activate_planner_task` 映射虚拟任务（`plugin.py:707-754`）；suffix 七项按序拼接（`plugin.py:1245-1274`）；写入 `items`/`messages`（§5.6） | 群被动轮跳过私聊背景 |
-| 9 | Planner 记账 | `plugin.py:1278` `on_planner_after` | OBSERVE，`record_observed(source="host_planner")` | 异常不影响主链 |
-| 10 | Replyer 注入 | `plugin.py:1288` `on_replyer` | 群轮次命中则不注入私聊背景（`plugin.py:1294-1296`）；`_prompt_payload(consume_backlog=True)`（此刻才消费休息积压）；写 `extra_prompt`（`plugin.py:1312`） | — |
-| 11 | Replyer 收口 | `plugin.py:1323` `on_replyer_after` | 13 道抑制闸门（§5.8.2）；通过则落 `_reply_confirmations[(session, anchor)]`（`plugin.py:1434-1444`） | 抑制 → `response=""` + `mai_life_suppress_reason` |
-| 12 | 发送前复核 | `plugin.py:1447` `on_send_before` | `recall_anchors()` 全集撤回复核；候选/任务权复核；`set_reply=False`；`reserve_send`；写 `mai_life_active_task_id` 元数据；relay `mutate_before_send`（§5.9.1） | 撤回/失效 → abort |
+| 1 | 入口收口 | `plugin.py:938` `on_receive` | 撤回通知优先（`plugin.py:946-952`）；停机/热重载/未就绪放行（`plugin.py:953`）；手滑命令回菜单并 abort（`plugin.py:956-967`）；`note_inbound` + `register_turn`（`plugin.py:969-971`） | 撤回通知 → `_handle_recall`（§10.3） |
+| 2 | 私聊管线前置 | `plugin.py:1045-1061` | `not uid or is_command` → abort/continue；`get_user` 未配置/未启用 → abort/continue；绑定 `stream_id` 与展示名 | 未配置用户不进任何增强 |
+| 3 | 防抖合并 | `plugin.py:1063` `MessageDebouncer.collect` | 连续补话合并成一条 `merged`；异常失败开放（`plugin.py:1063-1066`） | `allowed=False` → **必须 abort**（§5.3.5） |
+| 4 | 合并后登记 | `plugin.py:1073-1078` | 重取身份、`register_turn(merged)`、`_discard_recalled_private_turn` | 已撤回 → abort |
+| 5 | 互动与观察 | `plugin.py:1080-1092` | `record_interaction`（纯空消息不写）；spawn `continuity.refresh` 与 `memory.observe_message`（与来源消息绑定，支持撤回取消） | 后台任务异常只进日志 |
+| 6 | 休息闸门 | `plugin.py:1095` `RestGate.decide` | 时间窗优先、日程类型兜底；概率/LLM 判醒；建待醒候选（§4.7） | 阻断 → 非 `BLOCK_REASON` 写 `rest_backlogs` 后 abort |
+| 7 | 运行态落账 | `plugin.py:1119-1133` | `_detect_moment_signal`（3.2s 预算，§11.5）；写 `_session_runtime`；`_cancel_reply_confirmations`；`note_inbound` + `_supersede_active_task`（真实入站优先于未发送的主动轮） | 命令/阻断/未配置用户不写 |
+| 8 | Planner 注入 | `plugin.py:1239` `on_planner` | `_activate_planner_task` 映射虚拟任务（`plugin.py:709-756`）；suffix 七项按序拼接（`plugin.py:1247-1276`）；写入 `items`/`messages`（§5.6） | 群被动轮跳过私聊背景 |
+| 9 | Planner 记账 | `plugin.py:1280` `on_planner_after` | OBSERVE，`record_observed(source="host_planner")` | 异常不影响主链 |
+| 10 | Replyer 注入 | `plugin.py:1290` `on_replyer` | 群轮次命中则不注入私聊背景（`plugin.py:1296-1298`）；`_prompt_payload(consume_backlog=True)`（此刻才消费休息积压）；写 `extra_prompt`（`plugin.py:1314`） | — |
+| 11 | Replyer 收口 | `plugin.py:1325` `on_replyer_after` | 13 道抑制闸门（§5.8.2）；通过则落 `_reply_confirmations[(session, anchor)]`（`plugin.py:1436-1446`） | 抑制 → `response=""` + `mai_life_suppress_reason` |
+| 12 | 发送前复核 | `plugin.py:1449` `on_send_before` | `recall_anchors()` 全集撤回复核；候选/任务权复核；`set_reply=False`；`reserve_send`；写 `mai_life_active_task_id` 元数据；relay `mutate_before_send`（§5.9.1） | 撤回/失效 → abort |
 | 13 | 平台发送 | 适配器 | 消息真正离开宿主 | — |
-| 14 | 发送后结算 | `plugin.py:1539` `on_send_after` | `relay.confirm_after_send`；`finish_send`；主动事件 `mark_pending_sent`（`plugin.py:1569-1586`）；普通被动回复 `commit_for_send` 正式叫醒 + `_record_mood_event("passive_reply")`（`plugin.py:1616-1621`） | `sent=False` → 释放锁/候选/契机，事件标 failed（`plugin.py:1603-1615`） |
+| 14 | 发送后结算 | `plugin.py:1541` `on_send_after` | `relay.confirm_after_send`；`finish_send`；主动事件 `mark_pending_sent`（`plugin.py:1571-1588`）；普通被动回复 `commit_for_send` 正式叫醒 + `_record_mood_event("passive_reply")`（`plugin.py:1618-1623`） | `sent=False` → 释放锁/候选/契机，事件标 failed（`plugin.py:1605-1617`） |
 | 15 | 状态机收尾 | 后台循环 | `BedtimeManager` 60s 循环更新 `sleep_defer_until`（§11.2）；`_maintenance_tick` 10min 推进相位与数值（§11.1） | — |
 
-**贯穿主线的不变量**：第 3 步输家必须 abort；第 6 步被阻断的消息已经写了互动历史但不进 Planner/Replyer；第 7 步「只有真正进主链的消息才写运行态」；第 11–12 步之间代码反复复核撤回（`plugin.py:1520`、`1531`）；第 14 步一切结算以平台实际结果为准。
+**贯穿主线的不变量**：第 3 步输家必须 abort；第 6 步被阻断的消息已经写了互动历史但不进 Planner/Replyer；第 7 步「只有真正进主链的消息才写运行态」；第 11–12 步之间代码反复复核撤回（`plugin.py:1522`、`1531`）；第 14 步一切结算以平台实际结果为准。
 
 ### 10.2 群聊被动轮：与私聊的差异
 
-群消息走同一入口，但 `_process_group_message`（`plugin.py:974-1041`）在六个点上与私聊不同：
+群消息走同一入口，但 `_process_group_message`（`plugin.py:976-1043`）在六个点上与私聊不同：
 
 | 维度 | 私聊 | 群聊 |
 |---|---|---|
-| 用户校验 | `get_user` 必须已配置且启用（`plugin.py:1053-1055`） | 无档案要求，任何发言者都处理 |
+| 用户校验 | `get_user` 必须已配置且启用（`plugin.py:1055-1057`） | 无档案要求，任何发言者都处理 |
 | 防抖默认 | `debounce.enabled=True` | `debounce.group_enabled=False`（`config.py:931`） |
-| 轮次机制 | `_session_runtime[session]` 单会话 | `_group_turns[(session, mid)]` + `turn_scope` 按「群+发送者」隔离（`plugin.py:1021-1032`） |
-| 闸门 | 概率/LLM 判醒、建候选、写积压（§4.7） | `decide_group` 轻量版：强制词放行/勿扰阻断/其余静默，不建候选不写积压（`life/rest_gate.py:92-114`） |
-| 背景注入 | 完整生活背景 | 群轮次命中时**不注入任何私聊背景**（`plugin.py:1294-1296`） |
-| 唤醒 | 普通被动回复成功后叫醒 | 群消息不改变休息状态（`commit_for_send` 仅在非主动/非转述的普通私聊被动路径调用，`plugin.py:1617-1620`） |
+| 轮次机制 | `_session_runtime[session]` 单会话 | `_group_turns[(session, mid)]` + `turn_scope` 按「群+发送者」隔离（`plugin.py:1023-1034`） |
+| 闸门 | 概率/LLM 判醒、建候选、写积压（§4.7） | `decide_group` 轻量版：强制词放行/勿扰阻断/其余静默，不建候选不写积压（`life/rest_gate.py:105-132`） |
+| 背景注入 | 完整生活背景 | 群轮次命中时**不注入任何私聊背景**（`plugin.py:1296-1298`） |
+| 唤醒 | 普通被动回复成功后叫醒 | 群消息不改变休息状态（`commit_for_send` 仅在非主动/非转述的普通私聊被动路径调用，`plugin.py:1619-1622`） |
 
-群聊还多一条社交观察支线：防抖收口后的消息 spawn 给 `GroupObserver.observe`（`plugin.py:1033-1038`），走匿名摘要与群转私候选（§8.6）。
+群聊还多一条社交观察支线：防抖收口后的消息 spawn 给 `GroupObserver.observe`（`plugin.py:1035-1040`），走匿名摘要与群转私候选（§8.6）。
 
 ### 10.3 撤回通知旁路：`_handle_recall` 全链
 
-撤回不是消息而是通知，走完全独立于主链的旁路（`plugin.py:871-915`）：
+撤回不是消息而是通知，走完全独立于主链的旁路（`plugin.py:873-917`）：
 
 ```
 适配器撤回通知
   → recall_notice 归一化（messaging/adapter_compat.py:32，两套适配器同一结构）
-  → on_receive 判定为通知 → _handle_recall → abort（plugin.py:944-950，不进 Maisaka）
+  → on_receive 判定为通知 → _handle_recall → abort（plugin.py:946-952，不进 Maisaka）
       1. record_notice：持久墓碑先落库（messaging/recall_service.py:130）
-      2. _cancel_message_tasks：取消该消息派生的临时任务（plugin.py:879）
-      3. debouncer.recall：从尚未收口的窗口摘掉（plugin.py:880）
-      4. _cancel_recalled_confirmations：只取消命中的回复轮次（plugin.py:881）
-      5. 清待醒候选（plugin.py:882-883）
-      6. 私聊：redact_recalled_private_artifacts + save_continuity 清空（plugin.py:884-889）
-         群聊：通知群观察者、摘群轮次、释放轮次锁（plugin.py:890-903）
-      7. needs_summary_recovery → 后台 recover_notice_summary（plugin.py:904-908，3.0s 超时）
+      2. _cancel_message_tasks：取消该消息派生的临时任务（plugin.py:881）
+      3. debouncer.recall：从尚未收口的窗口摘掉（plugin.py:882）
+      4. _cancel_recalled_confirmations：只取消命中的回复轮次（plugin.py:883）
+      5. 清待醒候选（plugin.py:884-885）
+      6. 私聊：redact_recalled_private_artifacts + save_continuity 清空（plugin.py:886-891）
+         群聊：通知群观察者、摘群轮次、释放轮次锁（plugin.py:892-905）
+      7. needs_summary_recovery → 后台 recover_notice_summary（plugin.py:906-910，3.0s 超时）
   → 三道防线在后续阶段继续生效：
-      Replyer 输出后（plugin.py:1336）→ 发送前两次（plugin.py:1476、1520、1531）→ 持久查询（core/storage.py:1312）
+      Replyer 输出后（plugin.py:1338）→ 发送前两次（plugin.py:1478、1520、1531）→ 持久查询（core/storage.py:1312）
 ```
 
 合并轮次的撤回靠来源映射链命中：`mai_life_merged_message_ids` → `message_turn_sources` → `is_recalled_turn`（§5.11.3）。
@@ -3607,28 +3608,28 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 ### 10.4 主动（proactive）消息生命周期
 
 ```
-_proactive_loop（plugin.py:430-437，10min）
+_proactive_loop（plugin.py:432-439，10min）
   → ProactiveEngine.patrol（life/proactive.py:38-96）
       硬过滤 11 步（§6.6）→ 软评分（§6.7）→ consume_opportunity（life/proactive.py:96，条件更新防并发重复消费）
       → add_proactive_pending（life/proactive.py:98，status=pending，expires_at=now+120s）
       → ctx.maisaka.proactive.trigger(stream_id, intent="mai_life_proactive", reason=JSON, metadata={mai_life_event_id})
           （life/proactive.py:116-119）
   → Host 生成 Planner 请求
-      → on_planner：_activate_planner_task 从历史标记映射回事件（plugin.py:707-754）
+      → on_planner：_activate_planner_task 从历史标记映射回事件（plugin.py:709-756）
       → planner_instruction 告诉模型「任务编号不是 msg_id」（messaging/task_context.py:298-319）
-  → on_replyer_after：proactive 候选过期/取消/失败检查（plugin.py:1369-1381）；迟到放行 late_ok
-  → on_send_before：set_reply=False（plugin.py:1487-1489）；过期/禁用/已失败 abort
-  → on_send_after：mark_pending_sent 精确结算（event_id/host_task_id，plugin.py:1569-1586）
+  → on_replyer_after：proactive 候选过期/取消/失败检查（plugin.py:1371-1383）；迟到放行 late_ok
+  → on_send_before：set_reply=False（plugin.py:1489-1491）；过期/禁用/已失败 abort
+  → on_send_after：mark_pending_sent 精确结算（event_id/host_task_id，plugin.py:1571-1588）
       额度只在此处 +1（core/storage.py:1114-1116）
 ```
 
-失败与撤销路径：trigger 失败 → 释放契机 + 事件 failed（`life/proactive.py:120-124`）；`set_proactive_task_id` 时事件已非 pending → 回滚（`life/proactive.py:125-126`）；`CancelledError` → cancelled 并重新抛出（`life/proactive.py:129-132`）；Planner 沉默/超时 → `expire_pending` 释放契机重试或记 `planner_no_reply`（`core/storage.py:1127-1163`）；真实入站到达 → `_supersede_active_task` 作废未发送的主动轮并释放契机（`plugin.py:756-770`）。
+失败与撤销路径：trigger 失败 → 释放契机 + 事件 failed（`life/proactive.py:120-124`）；`set_proactive_task_id` 时事件已非 pending → 回滚（`life/proactive.py:125-126`）；`CancelledError` → cancelled 并重新抛出（`life/proactive.py:129-132`）；Planner 沉默/超时 → `expire_pending` 释放契机重试或记 `planner_no_reply`（`core/storage.py:1127-1163`）；真实入站到达 → `_supersede_active_task` 作废未发送的主动轮并释放契机（`plugin.py:758-772`）。
 
 ### 10.5 转述（relay）消息生命周期
 
 两类转述共用 `relay_candidates` 状态机，入口不同：
 
-- **显式转述**：`/麦麦转述 <QQ群号> <内容>`（`plugin.py:1966-1976`）→ `trigger_explicit`（`social/relay_service.py:77-123`）：白名单精确群号、内容清洗、stream 解析（目录缓存需 `unique_group_for_stream` 证明唯一）、拿不到 Host `task_id` 即失败。
+- **显式转述**：`/麦麦转述 <QQ群号> <内容>`（`plugin.py:2011-2021`）→ `trigger_explicit`（`social/relay_service.py:77-123`）：白名单精确群号、内容清洗、stream 解析（目录缓存需 `unique_group_for_stream` 证明唯一）、拿不到 Host `task_id` 即失败。
 - **群转私**：`GroupObserver` 观察摘要达标后 `_queue_private_share_locked`（`social/group_observer.py:195-243`）建候选 + `group_public` 契机，之后与显式转述同链。
 
 共同后半段：
@@ -3638,7 +3639,7 @@ prompt_context 注入 Planner 背景（仅 pending/sending，social/relay_servic
   → on_send_before：should_abort_send 阻断过期/已取代/已失败（social/relay_service.py:139-149）
   → mutate_before_send：原子 pending→sending，候选 ID 写进 additional_config.mai_life_relay_id
     （social/relay_service.py:151-162，Host 正常分段只有第一段命中）
-  → on_send_after：confirm_after_send 按该 ID 结算（plugin.py:1545、social/relay_service.py:164-171）
+  → on_send_after：confirm_after_send 按该 ID 结算（plugin.py:1547、social/relay_service.py:164-171）
 ```
 
 Planner 沉默或超时不记为已发送（`config.py:354-356` hint 与 `core/storage.py:1671-1684`）；同 stream 新显式候选把旧 pending 标 superseded（`core/storage.py:1568-1587`）。
@@ -3648,7 +3649,7 @@ Planner 沉默或超时不记为已发送（`config.py:354-356` hint 与 `core/s
 创作完全由后台循环驱动，不被消息触发；它与消息链的唯一交点是「归档后的分享契机」进入主动通道（§10.4）：
 
 ```
-_creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
+_creation_loop（plugin.py:458-468，默认 60min；禁用时 300s 空转）
   → CreationService.tick（creation/creation_service.py:50）：取锁 → recover_creation_claims 崩溃恢复
   → 硬过滤（§8.3）→ InspirationService.collect 四来源（§8.5）→ claim_creation_inspiration 条件抢占
   → _select_continuation：续写旧书 or 开新书（§8.4）
@@ -3672,35 +3673,35 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
 
 ```
 每日 03:00（schedule.generate_hour，config.py:1063）
-  _daily_generation_loop 睡到整点后醒来（plugin.py:400-412）
+  _daily_generation_loop 睡到整点后醒来（plugin.py:402-414）
     → 刷天气（allow_weather_network=True）
-    → 取记忆上下文（MemoryService.schedule_context，plugin.py:408）
+    → 取记忆上下文（MemoryService.schedule_context，plugin.py:410）
     → ScheduleService.ensure_day(force=True)：重生成当日框架（§4.5）
 
 每 10 分钟（state.tick_interval_minutes，config.py:493-496）
-  _maintenance_loop → _maintenance_tick（plugin.py:475-501，_maintenance_lock 串行化）
-    1. 刷天气（启动/热更新时 allow_network=False 不打网，plugin.py:299、356）
-    2. 绘图插件复检（仅 drawpic_enabled，plugin.py:481）
-    3. ensure_day（缺当日日程才生成）+ expand_due 细化临近场景（plugin.py:476-479）
-    4. BedtimeManager.tick —— 先于相位推进（plugin.py:483，理由见 §11.2）
-    5. state_timeline 按日程边界切片 → advance_timeline 逐段推进（plugin.py:485-486，§4.3）
-    6. 落一小时状态快照（INSERT OR IGNORE，plugin.py:488）
-    7. MemoryService.ensure_daily：日期契机补算 → diary_hour（默认 2 点）后才补日记（plugin.py:489，§6.4）
-    8. _settle_relationships 按自然日补算关系温度（最多回看一年，plugin.py:496-520）
-    9. cleanup_runtime_records 清运行记录（90 天，plugin.py:491-494，§3.5）
+  _maintenance_loop → _maintenance_tick（plugin.py:477-503，_maintenance_lock 串行化）
+    1. 刷天气（启动/热更新时 allow_network=False 不打网，plugin.py:301、356）
+    2. 绘图插件复检（仅 drawpic_enabled，plugin.py:483）
+    3. ensure_day（缺当日日程才生成）+ expand_due 细化临近场景（plugin.py:478-481）
+    4. BedtimeManager.tick —— 先于相位推进（plugin.py:485，理由见 §11.2）
+    5. state_timeline 按日程边界切片 → advance_timeline 逐段推进（plugin.py:487-488，§4.3）
+    6. 落一小时状态快照（INSERT OR IGNORE，plugin.py:490）
+    7. MemoryService.ensure_daily：日期契机补算 → diary_hour（默认 2 点）后才补日记（plugin.py:491，§6.4）
+    8. _settle_relationships 按自然日补算关系温度（最多回看一年，plugin.py:498-522）
+    9. cleanup_runtime_records 清运行记录（90 天，plugin.py:493-496，§3.5）
 ```
 
 **顺序的三个关键点**：
 
 - **日记（2 点）早于日程生成（3 点）**：`ensure_daily` 在维护 tick 内串行调用，但受 `diary_hour` 门控（`life/memory_service.py:136`）；凌晨 2 点先落「昨天的日记」，3 点的强制重生成才能把它当素材（`life/schedule_service.py:244-247` 书架标题、探索笔记进灵感池）。
-- **BedtimeManager.tick 先于 advance**：注释 `plugin.py:482`——静默刚达标时先更新 defer/回睡，`advance` 才不会按旧值提前睡过去。
-- **advance_timeline 双保险**：`simulation_start=max(last_updated, now-72h)`（`plugin.py:481`）与 `advance` 内 72 小时钳制（`life/life_state.py:83`）共同防止离线数月后一次补算数百天。
+- **BedtimeManager.tick 先于 advance**：注释 `plugin.py:484`——静默刚达标时先更新 defer/回睡，`advance` 才不会按旧值提前睡过去。
+- **advance_timeline 双保险**：`simulation_start=max(last_updated, now-72h)`（`plugin.py:483`）与 `advance` 内 72 小时钳制（`life/life_state.py:83`）共同防止离线数月后一次补算数百天。
 
 ### 11.2 睡前协商与闸门（60 秒循环）
 
 ```
 每 60 秒（BEDTIME_LOOP_SECONDS，life/bedtime.py:21）
-  _bedtime_loop → BedtimeManager.tick（plugin.py:421-428）
+  _bedtime_loop → BedtimeManager.tick（plugin.py:423-430）
     → _update_sleep_defer（life/bedtime.py:70）：
         前提：rest_gate.enabled 且相位未睡且不在宽限，且当前在夜窗内（life/bedtime.py:76-77）
         defer = max(floor=今晚夜窗开始, latest=所有用户最后发言 + 10min)（life/bedtime.py:78-81）
@@ -3710,21 +3711,21 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
         清宽限与 defer，life/life_state.py:274-275）
 
 用户发消息（夜窗内）
-  → RestGate.decide（plugin.py:1093）：
-      时间窗 OR 日程类型命中（life/rest_gate.py:147-152）
-      → defer 未到 → 放行「睡前对话未完，暂缓入睡」（life/rest_gate.py:161）
+  → RestGate.decide（plugin.py:1095）：
+      时间窗优先、日程类型兜底命中（life/rest_gate.py:165-175）
+      → defer 未到 → 放行「睡前对话未完，暂缓入睡」（life/rest_gate.py:184）
       → boundary 分类：强制词 > 勿扰词 > 紧急词（life/rest_gate.py:29-40）
-      → 概率或 LLM 判醒 → 建待醒候选（life/rest_gate.py:116-122）
+      → 概率或 LLM 判醒 → 建待醒候选（life/rest_gate.py:134-140）
   → 回复真正发送成功 → commit_for_send → mark_woken（§4.8）
-  → 宽限 30 分钟内消息直接放行、不重新入睡（life/rest_gate.py:162、life/life_state.py:86）
+  → 宽限 30 分钟内消息直接放行、不重新入睡（life/rest_gate.py:185、life/life_state.py:86）
 ```
 
-**为什么 bedtime 是独立 60 秒循环而不并入 10 分钟维护 tick**：`defer` 必须新鲜——10 分钟级的 tick 会在静默刚达标时误拦仍在进行的对话（注释 `plugin.py:424`）。**为什么协商与闸门共用同一套开关和夜窗**：夜窗一致性要求（docstring `life/bedtime.py:10-11`），用户改 `night_start` 两个流程必须一起变。
+**为什么 bedtime 是独立 60 秒循环而不并入 10 分钟维护 tick**：`defer` 必须新鲜——10 分钟级的 tick 会在静默刚达标时误拦仍在进行的对话（注释 `plugin.py:426`）。**为什么协商与闸门共用同一套开关和夜窗**：夜窗一致性要求（docstring `life/bedtime.py:10-11`），用户改 `night_start` 两个流程必须一起变。
 
 ### 11.3 搜索与新闻入库
 
 ```
-每 60 秒（information.enabled；禁用时 300s 空转，plugin.py:439-454）
+每 60 秒（information.enabled；禁用时 300s 空转，plugin.py:441-456）
   _information_loop → InformationService.tick（information/information_service.py:112）
     → NewsService.refresh_due（information/news_service.py:32）
         门控：总开关 + news.enabled + daily_max + 日程类型 + 当日未超额（§7.7）
@@ -3748,7 +3749,7 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
 ### 11.4 创作与续写
 
 ```
-每 60 分钟（creation.patrol_interval_minutes；禁用时 300s 空转，plugin.py:456-466）
+每 60 分钟（creation.patrol_interval_minutes；禁用时 300s 空转，plugin.py:458-468）
   _creation_loop → CreationService.tick（creation/creation_service.py:50）
     → asyncio.Lock（与 /麦麦立即创作 的 force tick 互斥）
     → 首次执行 recover_creation_claims：有 final 修订的文档恢复 archived（core/storage.py:1736-1764）
@@ -3772,34 +3773,34 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
 绘图联动是唯一「本插件引导模型调用另一个插件工具」的链路，全部状态在进程内存：
 
 ```
-on_load / 配置热更新 / 维护 tick（plugin.py:304、355、481）
-  → _check_drawpic（plugin.py:554-567）：
+on_load / 配置热更新 / 维护 tick（plugin.py:306、355、481）
+  → _check_drawpic（plugin.py:556-569）：
       ctx.component.list_loaded_plugins 查 DRAWPIC_PLUGIN_ID="maimai-drawpic-plugin"（plugin.py:58）
-      异常只告警一次并按未安装处理（plugin.py:563-565）；结果存 _drawpic_loaded
+      异常只告警一次并按未安装处理（plugin.py:565-567）；结果存 _drawpic_loaded
       语义边界：只证明插件已加载，不证明版本或绘图平台 Key 已配（宿主该能力只回插件 ID 列表）
 
-私聊消息进入主链后（闸门放行之后，plugin.py:1119）
-  → _detect_moment_signal（plugin.py:569-602）：
-      _MOMENT_PHOTO_RE 命中 → "photo" 强信号（plugin.py:577）
-      _MOMENT_LIFE_WORDS 命中 → 弱信号，需 drawpic 已安装 + relevance 任务可用（plugin.py:578-580）
-      → LLM 判定「是否自然贴题」，3.2s 硬超时（plugin.py:592-596，为 on_receive 30s 预算服务）
+私聊消息进入主链后（闸门放行之后，plugin.py:1121）
+  → _detect_moment_signal（plugin.py:571-604）：
+      _MOMENT_PHOTO_RE 命中 → "photo" 强信号（plugin.py:579）
+      _MOMENT_LIFE_WORDS 命中 → 弱信号，需 drawpic 已安装 + relevance 任务可用（plugin.py:580-582）
+      → LLM 判定「是否自然贴题」，3.2s 硬超时（plugin.py:594-598，为 on_receive 30s 预算服务）
       → 判定冷却：60 分钟内最多 2 次（plugin.py:66-70 常量、582-585）
-  结果写 _session_runtime[session]["moment_signal"]（plugin.py:1123）
+  结果写 _session_runtime[session]["moment_signal"]（plugin.py:1125）
 
-Planner 请求前（on_planner，plugin.py:1284-1285）
-  → _moment_guide_note（plugin.py:604-660）：九重守卫全过才注入——
+Planner 请求前（on_planner，plugin.py:1286-1287）
+  → _moment_guide_note（plugin.py:606-662）：九重守卫全过才注入——
       drawpic 开关+已检测、非群会话、无 active 任务、tool_definitions 非空（空⇔表情包/评审轮）、
-      draw 工具在本轮工具定义里可见（plugin.py:613-616；关闭检测陈旧窗口：_drawpic_loaded 最多
+      draw 工具在本轮工具定义里可见（plugin.py:615-618；关闭检测陈旧窗口：_drawpic_loaded 最多
       10 分钟才复检，插件中途卸载后旧 True 会让引导指向一个不存在的工具；名字提取兼容 OpenAI function
       结构与平铺 name，对应宿主 chat_loop_service.py:1242 的序列化形态）、
       payload 非空（context.enabled=False 或群被动轮不构建 payload，on_planner 构建分支
-      plugin.py:1255-1257，联动静默不触发）、非睡前氛围期、段型非 sleep/nap、
+      plugin.py:1257-1259，联动静默不触发）、非睡前氛围期、段型非 sleep/nap、
       频控（对话通道 2h / 状态通道 12h / 每日 3 次；被守卫拦下的轮次不写频控记录）
-  → 注入「生活分享时刻」引导（独立 suffix，不受 _clip(4000) 截断，plugin.py:1284 注释）
-  → 注入即消费信号（plugin.py:656-657），防同一信号重复注入
+  → 注入「生活分享时刻」引导（独立 suffix，不受 _clip(4000) 截断，plugin.py:1286 注释）
+  → 注入即消费信号（plugin.py:658-659），防同一信号重复注入
 
 模型自行决定调用 draw 工具 → 麦麦绘图插件后台生成并自动发进会话（引导文案明确要求
-  不要轮询 draw_status、失败不重试，plugin.py:641-655）
+  不要轮询 draw_status、失败不重试，plugin.py:643-657）
 ```
 
 契约核对（v1.23.2，按 drawpic 2.1.1 源码逐字）：引导文案只引用 drawpic 已注册的 Tool 名
@@ -3808,8 +3809,8 @@ Planner 请求前（on_planner，plugin.py:1284-1285）
 drawpic 2.1.1 另有 16 个 public @API（interfaces/api/ 下 integration/tasks_v2/preferences），
 本联动刻意不走 API 通道（plugin.py:51-57 注释）：注入即时、零 RPC、失败由 drawpic 直发会话通知。
 
-可见性：`/麦麦配置` 显示「开启（已检测到/未检测到）/关闭」（plugin.py:1864）；WebUI `linkage`
-段给 drawpic_enabled / drawpic_detected（plugin.py:2079-2080、2432-2433）。
+可见性：`/麦麦配置` 显示「开启（已检测到/未检测到）/关闭」（plugin.py:1909）；WebUI `linkage`
+段给 drawpic_enabled / drawpic_detected（plugin.py:2124-2125、2432-2433）。
 **为什么检测结果是内存态**：注释 plugin.py:207——重启丢失可接受，下次 tick 会复检。
 
 ---
@@ -3824,15 +3825,15 @@ drawpic 2.1.1 另有 16 个 public @API（interfaces/api/ 下 integration/tasks_
 
 `webui.json` 的 `schema_version: 2`（`webui.json:2`）不是普通版本号：协议 1 的声明会被宿主**整插件注册拒绝**（`docs/webui-extension.md:5`）。协议 2 相对 1 是破坏性变更——移除了 `repeat`/`gallery`/`upload` 组件与 `scope:"item"`，新增 `progress`/`image` 组件、custom HTML 页面与 `required_capabilities`（`docs/webui-extension.md:5`、`:70`）。实际约束：7 页全部只读、每页 ≤200 组件（system 页已用 185）、文件 114.2 KiB / 128 KiB、每插件并发 2、API 超时 10 秒、响应 ≤512 KiB（§9.3、§9.7）。宿主契约的权威来源在 MaiBot 仓库（协议文档与 WebUI schema 校验模块），本仓库内的 docs 只是转述——**未读宿主源码，未确认**。
 
-#### 12.1.2 两条闸门触发路径（时间窗 OR 日程类型）
+#### 12.1.2 闸门触发路径（时间窗优先，日程类型兜底）
 
-休息闸门的生效条件是一条跨模块的 OR：**夜窗/午休窗内一定生效，或当前日程段型在 `gate_segment_types` 里也生效**（`life/rest_gate.py:147-152`）。三条必须记住的后果：
+休息闸门的生效条件：**夜窗/午休窗内一定生效；`gate_segment_types` 是时间窗未配置（起止相同）时的兜底，`rest` 等无对应时间窗的类型列出后任意时间生效**（`life/rest_gate.py:161-175`，v1.23.3 起时间窗优先）。三条必须记住的后果：
 
-- 默认 `gate_segment_types=["sleep","nap"]` 意味着日程一进睡眠段闸门就生效，**可能早于夜窗开始**（配置文案自己写明了，`config.py:806`）；
+- 默认 `gate_segment_types=["sleep","nap"]`：配了起止不同的夜窗后，日程睡眠段**不会**让闸门提前生效（v1.23.3 修复了“夜窗设 00:00 而日程 22:30 就寝、22:30 起即被屏蔽”的实测踩坑）；夜窗起止相同（停用）时才回退该列表兜底；
 - `night_start == night_end` 让该窗口永假，只剩段型一条路，用户完全看不出来（每小时一条告警，`life/rest_gate.py:42-66`）；
-- 框架有空档时 `current=None`、段型为空，又只剩时间窗一条路（`life/rest_gate.py:150-151`，§4.7）。
+- 框架有空档时 `current=None`、段型为空，又只剩时间窗一条路（`life/rest_gate.py:168-169`，§4.7）。
 
-同一个 OR 结构还决定了睡前协商（defer）与群观察静音窗的边界（§11.2、§8.6）。
+睡前协商（defer）与群观察静音窗的边界见 §11.2、§8.6（群观察只读时间窗，不读段型列表）。
 
 #### 12.1.3 模型通道依赖
 
@@ -3842,7 +3843,7 @@ drawpic 2.1.1 另有 16 个 public @API（interfaces/api/ 下 integration/tasks_
 - **结构化任务默认走快模型是防超时设计**：慢推理模型生成 JSON 日程要 27-30 秒，会撞穿 Host 30 秒 `cap.call` 超时（`core/llm_service.py:62-64`）。
 - **SDK 版本分歧**：SDK 2.8.1+ 必须显式传 `task_name` 且 `model` 传空串，更旧 SDK 的 `model` 即任务名（`core/llm_service.py:24-46`）；部署环境实际版本在 2.7.0–2.99.99 之间（`_manifest.json:17-18`），**未确认**。
 - **`max_output_tokens=0` 是刻意的**：不下发字段、由服务商决定；写死小上限会把推理模型的正文挤成空响应（§3.7）。
-- **无模型时的降级全景**：日程/梦境/创作走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`、`creation/creation_service.py:21-32`），判醒 LLM 模式回退概率（`life/rest_gate.py:169-171`），日期模型兜底默认关闭（`config.py:586`）。叙事任务无模型时 WebUI 会明确告知是占位内容（`plugin.py:2207-2210`）。
+- **无模型时的降级全景**：日程/梦境/创作走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`、`creation/creation_service.py:21-32`），判醒 LLM 模式回退概率（`life/rest_gate.py:192-194`），日期模型兜底默认关闭（`config.py:586`）。叙事任务无模型时 WebUI 会明确告知是占位内容（`plugin.py:2252-2255`）。
 
 #### 12.1.4 测试环境与验证方法（本仓库的现实）
 

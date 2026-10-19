@@ -24,3 +24,5 @@ webui_v1_backup.json
 webui_v2.json
 docs/_draft_*.md
 docs/_plan_*.md
+AGENTS.md
+CONTRIBUTING.md
