@@ -14,7 +14,7 @@ PYTHONPATH="D:/MaiBot/plugin/maibot-plugin-sdk-2.8.2;D:/MaiBot/plugin" \
   -m unittest discover -s Mai_life/tests
 ```
 
-- 全量 542 个测试、100 秒内跑完。**提交前必须全绿**，没有例外。
+- 全量 545 个测试、100 秒内跑完。**提交前必须全绿**，没有例外。
 - 单独跑一个模块：把 `discover -s Mai_life/tests` 换成 `Mai_life.tests.test_core` 这类模块路径。
 - 部署环境验证（用宿主自带 Python + 真实 maibot_sdk，用于确认 SDK 兼容性）：
   `"C:/Users/octmicy/AppData/Roaming/MaiBotOneKeyDesktop/0163381a22cb/python-env/python.exe"`，cwd 同上，**不需要 PYTHONPATH**。
@@ -36,7 +36,7 @@ PYTHONPATH="D:/MaiBot/plugin/maibot-plugin-sdk-2.8.2;D:/MaiBot/plugin" \
 - **改文件用 Python 二进制读写更稳**：本环境的编辑工具偶尔会把直引号规范化成弯引号（Python 直接语法错误），改完务必 `py_compile`。
 - **两套 SDK**：开发用 2.8.2 副本，部署是 2.12.0。行为差异集中在 `llm.generate` 的 `task_name` 契约和 WebUI 协议版本（现在是 v2：`schema_version: 2`，无 repeat/gallery/upload，无 `scope:"item"`）。
 - **WebUI 协议以宿主源码为准**，不是公开文档：`C:/Users/octmicy/AppData/Roaming/MaiBotOneKeyDesktop/0163381a22cb/modules/MaiBot/src/plugin_runtime/webui_schema.py`。协议变更时"文档路径真实性 + 模块覆盖"这类机械核查会被宿主打脸。
-- **休息闸门有两条独立触发路径**：时间窗 **OR** `gate_segment_types`（默认含 sleep/nap）。改夜窗开始时间不管用，是因为日程一进睡眠段闸门就生效——详见 `docs/plugin-guide.md` 第 4 章。
+- **休息闸门时间窗优先**（v1.23.3 起）：配了起止不同的夜窗/午休窗后闸门只按时间窗走；`gate_segment_types`（默认含 sleep/nap）只在对应窗口起止相同（停用）时兜底，`rest` 等无对应窗口类型列出后任意时间生效。“改夜窗开始时间不管用”是 v1.23.3 前的旧行为——详见 `docs/plugin-guide.md` 第 4 章。
 - **测试替身不全**：本机默认 Python 没有 `maibot_sdk`，子代理用桩跑全量会出现大量环境性失败；判回归要用 HEAD 快照对照，别把环境噪声当回归。
 - **`/workflow` 跑动态工作流时**：`world.run` 的 cwd 不保证是仓库根，命令里用绝对路径；门禁逻辑先在小片段里试通再进脚本。
 - **麦麦绘图联动两条隐性耦合**：引导注入要求 payload 非空，而 payload 只在 `context.enabled=True` 且非群被动轮构建（on_planner 构建分支，plugin.py:1255-1257）——关掉上下文配置，联动静默消失；drawpic 检测是 10 分钟一复检的内存态，注入期另查 `draw` 工具是否在本轮工具定义里（零 RPC），关掉的是「插件中途卸载后的陈旧窗口」。详见 `docs/plugin-guide.md` §11.5。

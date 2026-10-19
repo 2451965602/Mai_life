@@ -776,13 +776,17 @@ class RestAndStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(on["mood_valence"],off["mood_valence"])
 
     async def test_gate_requires_time_window_or_listed_segment(self):
-        """v1.14.12：时间窗 OR 生效日程类型；sleep 在默认列表内，窗外也拦。"""
+        """v1.23.3 起时间窗优先：配了起止不同的夜窗，窗外睡眠段不拦；夜窗起止相同才回退日程类型兜底。"""
         daytime=self.now.replace(hour=10)
         self.config.rest_gate.wake_probability=0
         allowed,reason=await self.gate.decide("1","普通消息",daytime,{"kind":"sleep"})
-        self.assertFalse(allowed); self.assertEqual(reason,"probability:0.00")
+        self.assertTrue(allowed); self.assertEqual(reason,"outside_gate_window")
         allowed,reason=await self.gate.decide("1","普通消息",daytime,{"kind":"meal"})
         self.assertTrue(allowed); self.assertEqual(reason,"outside_gate_window")
+        # 夜窗起止相同（主动停用）→ 回退日程类型兜底：默认列表内的 sleep 仍拦。
+        self.config.rest_gate.night_start="10:00"; self.config.rest_gate.night_end="10:00"
+        allowed,reason=await self.gate.decide("1","普通消息",daytime,{"kind":"sleep"})
+        self.assertFalse(allowed); self.assertEqual(reason,"probability:0.00")
         self.assertFalse(self.gate._in_window("22:30","08:00","08:00"))
         self.assertFalse(self.gate._in_window("00:00","00:00","00:00"))
 

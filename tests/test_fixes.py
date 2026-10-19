@@ -1075,10 +1075,17 @@ class GateTimeWindowTests(unittest.IsolatedAsyncioTestCase):
         allowed, reason = await self.gate.decide(
             "1", "普通消息", datetime(2026, 9, 21, 12, 30, tzinfo=TZ), {"kind": "meal"})
         self.assertFalse(allowed); self.assertEqual(reason, "probability:0.00")
-        # 两个时间窗之外：未列入生效类型的日程段放行；sleep 在默认列表内，窗外也拦。
+        # 两个时间窗之外：未列入生效类型的日程段放行；时间窗优先（v1.23.3）后
+        # sleep 段同样放行——夜窗配了起止时间，日程睡眠段不让闸门提前生效。
         allowed, reason = await self.gate.decide(
             "1", "普通消息", datetime(2026, 9, 21, 10, 0, tzinfo=TZ), {"kind": "meal"})
         self.assertTrue(allowed); self.assertEqual(reason, "outside_gate_window")
+        allowed, reason = await self.gate.decide(
+            "1", "普通消息", datetime(2026, 9, 21, 10, 0, tzinfo=TZ), {"kind": "sleep"})
+        self.assertTrue(allowed); self.assertEqual(reason, "outside_gate_window")
+        # 夜窗起止相同（停用）时才回退日程类型兜底。
+        self.config.rest_gate.night_start = "10:00"
+        self.config.rest_gate.night_end = "10:00"
         allowed, reason = await self.gate.decide(
             "1", "普通消息", datetime(2026, 9, 21, 10, 0, tzinfo=TZ), {"kind": "sleep"})
         self.assertFalse(allowed); self.assertEqual(reason, "probability:0.00")
@@ -1662,14 +1669,20 @@ class GroupGateDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed)
 
     async def test_listed_segment_type_gates_outside_window(self):
-        """group_gate_segment_types 与私聊 OR 语义一致：列出的日程类型在任意时间生效。
-
-        默认列表与私聊一致（sleep/nap）：15:00 不在群夜窗/午休窗内，但段类型命中即静默。
-        """
-        gate = self._gate(make_group_config(group_gate=True))
-        allowed, reason = gate.decide_group("下午好呀", DAYTIME, "100", {"kind": "nap"})
+        """无对应时间窗的类型（rest）列出后任意时间生效（v1.23.3 时间窗优先后保持不变）。"""
+        config = make_group_config(group_gate=True)
+        config.rest_gate.group_gate_segment_types = ["sleep", "nap", "rest"]
+        gate = self._gate(config)
+        allowed, reason = gate.decide_group("下午好呀", DAYTIME, "100", {"kind": "rest"})
         self.assertFalse(allowed)
         self.assertEqual(reason, "群休息时段静默")
+
+    async def test_configured_group_window_wins_over_nap_segment(self):
+        """群午休窗配了起止时间后，窗外 nap 段不静默（与私聊同构的时间窗优先）。"""
+        gate = self._gate(make_group_config(group_gate=True))
+        allowed, reason = gate.decide_group("下午好呀", DAYTIME, "100", {"kind": "nap"})
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "outside_group_window")
 
     async def test_unlisted_segment_type_passes_outside_window(self):
         gate = self._gate(make_group_config(group_gate=True))
@@ -1679,8 +1692,10 @@ class GroupGateDecisionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_segment_type_gate_respects_force_wake_term(self):
         """日程类型命中时，强制唤醒词仍然放行（与时间窗内行为一致）。"""
-        gate = self._gate(make_group_config(group_gate=True))
-        allowed, reason = gate.decide_group("出事了救命啊", DAYTIME, "100", {"kind": "nap"})
+        config = make_group_config(group_gate=True)
+        config.rest_gate.group_gate_segment_types = ["sleep", "nap", "rest"]
+        gate = self._gate(config)
+        allowed, reason = gate.decide_group("出事了救命啊", DAYTIME, "100", {"kind": "rest"})
         self.assertTrue(allowed)
         self.assertIn("强制唤醒词", reason)
 
@@ -4942,23 +4957,42 @@ class V11412GateSegmentTypeTests(unittest.IsolatedAsyncioTestCase):
             "1", "在吗", datetime(2026, 9, 21, 15, 0, tzinfo=TZ), {"kind": "leisure"})
         self.assertTrue(allowed); self.assertEqual(reason, "outside_gate_window")
 
-    async def test_sleep_segment_gates_before_night_start(self):
-        """两条触发路径相互独立：夜窗改成 00:00 也挡不住睡眠段提前生效。
+    async def test_configured_night_window_wins_over_sleep_segment(self):
+        """v1.23.3 起时间窗优先：夜窗配了起止时间，日程睡眠段不让闸门提前生效。
 
-        用户实测踩坑：night_start 设 00:00，但日程 22:30 就寝（kind=sleep），
-        gate_segment_types 默认含 sleep → 22:30 就开始屏蔽。清空该列表才只按夜窗控制。
+        用户实测踩坑（v1.23.3 修复）：night_start 设 00:00，但日程 22:30 就寝
+        （kind=sleep）；旧逻辑下 gate_segment_types 默认含 sleep，22:30 即开始
+        屏蔽、被叫醒提示词比用户设置点提前一个半小时注入。现在 22:30 照常回复，
+        闸门只按用户配置的时间窗走。
         """
         self.config.rest_gate.night_start = "00:00"
         self.config.rest_gate.night_end = "08:00"
         allowed, reason = await self._gate().decide(
             "1", "在吗", datetime(2026, 9, 21, 22, 30, tzinfo=TZ), {"kind": "sleep"})
-        self.assertFalse(allowed)
-        self.assertEqual(reason, "probability:0.00")
-        self.config.rest_gate.gate_segment_types = []
-        allowed, reason = await self._gate().decide(
-            "1", "在吗", datetime(2026, 9, 21, 22, 30, tzinfo=TZ), {"kind": "sleep"})
         self.assertTrue(allowed)
         self.assertEqual(reason, "outside_gate_window")
+
+    async def test_sleep_segment_falls_back_when_night_window_unset(self):
+        """夜窗起止相同（主动停用）时回退日程类型兜底：睡眠段仍拦消息。"""
+        self.config.rest_gate.night_start = "00:00"
+        self.config.rest_gate.night_end = "00:00"
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 22, 30, tzinfo=TZ), {"kind": "sleep"})
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "probability:0.00")
+
+    async def test_nap_segment_respects_configured_nap_window(self):
+        """午休窗配了起止时间后窗外 nap 段不拦；起止相同才回退兜底（与夜窗同构）。"""
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 15, 0, tzinfo=TZ), {"kind": "nap"})
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "outside_gate_window")
+        self.config.rest_gate.nap_start = "15:00"
+        self.config.rest_gate.nap_end = "15:00"
+        allowed, reason = await self._gate().decide(
+            "1", "在吗", datetime(2026, 9, 21, 15, 0, tzinfo=TZ), {"kind": "nap"})
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "probability:0.00")
 
     async def test_window_still_gates_regardless_of_segment_kind(self):
         """P2-4 回归：默认框架的 leisure 段落在夜窗内，闸门照常生效。"""

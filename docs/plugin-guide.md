@@ -168,7 +168,7 @@
 1. **状态数值只由确定性规则推进，LLM 不得直接改写**：`LifeStateEngine.advance` 是唯一改写核心数值的入口（`life/life_state.py:79`，铁律注释在 `life/life_state.py:78`）；场景增量 `apply_deltas` 也只接受四个钳位键（`life/life_state.py:190-195`）。
 2. **单写者存储**：全部业务状态在一个 SQLite 文件，由 `LifeStore` 以「一条连接 + 一个 `asyncio.Lock`」串行化（`core/storage.py:35-37`），复合写套 `BEGIN IMMEDIATE`（`core/storage.py:124-134`）。服务层不各自持有连接。
 3. **撤回三道防线 + 墓碑先行**：持久墓碑先落库（`messaging/recall_service.py:149` 注释），Replyer 输出后、发送前（两次）、持久查询三层复核（`plugin.py:1336`、`plugin.py:1476`、`plugin.py:1520`、`plugin.py:1531`，`core/storage.py:1312`）。
-4. **平台确认才结算**：主动额度只在 `mark_pending_sent`（`core/storage.py:1078-1125`，调用点 `plugin.py:1574`）累加；唤醒是两段式（候选 `wake_candidates` → 发送成功后 `commit_for_send`，`life/rest_gate.py:116-122`、`life/rest_gate.py:201-206`）。
+4. **平台确认才结算**：主动额度只在 `mark_pending_sent`（`core/storage.py:1078-1125`，调用点 `plugin.py:1574`）累加；唤醒是两段式（候选 `wake_candidates` → 发送成功后 `commit_for_send`，`life/rest_gate.py:134-140`、`life/rest_gate.py:224-229`）。
 5. **防抖输家必须 abort**：`MessageDebouncer.collect` 返回 `allowed=False` 时调用方必须 `abort`（`plugin.py:991`、`plugin.py:1065-1066`），否则同一条消息会被两个 Hook 各处理一遍，产生重复回复。
 6. **隐私分层**：日记只有 owner 可读（`life/memory_service.py:256-266`）；群摘要原文绝不入库、敏感内容模型前拒（`social/group_observer.py:141`）；搜索 Key 只出指纹、原始 Key 从不入库（`information/search_service.py:75`、`core/storage.py:428`）；搜索词过隐私清洗（`information/search_service.py:127`）。
 7. **失败开放与降级**：`_is_recalled` 存储异常时放行（`plugin.py:843-846`）；模型不可用走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`）。
@@ -525,13 +525,13 @@ for name,s in sorted(schema['sections'].items(), key=lambda kv: kv[1]['order']):
 | `wake_probability` | `0.18`（0~1） | probability 模式普通消息叫醒概率（`config.py:778-785`） |
 | `llm_threshold` | `70`（0~100） | LLM 模式分数阈值（`config.py:786-793`） |
 | `awake_grace_minutes` | `30`（0~240） | 叫醒后免重复判醒的缓冲（`config.py:794-801`） |
-| `gate_segment_types` | `["sleep","nap"]` | `list[Literal[...]]`；夜窗/午休窗内一定生效，列出的日程类型任意时间也生效（OR 语义）；清空则只按时间窗控制（`config.py:802-810`） |
+| `gate_segment_types` | `["sleep","nap"]` | `list[Literal[...]]`；夜窗/午休窗内一定生效，本列表是时间窗未配置（起止相同）时的兜底 + rest 等无对应窗口类型的开关（时间窗优先，v1.23.3）；清空则只按时间窗控制（`config.py:802-810`） |
 | `force_wake_terms` | 12 个中文词（救命/急事/报警/醒醒/快醒/叫醒/出事了/很难受/撑不住/危险/轻生/自杀） | 含任意一词无视勿扰词与概率立即放行（`config.py:811-817`） |
 | `night_start`/`night_end`/`nap_start`/`nap_end` | `"22:30"`/`"08:00"`/`"12:00"`/`"14:30"` | 时间窗支持跨午夜；起=止时该窗永不生效；非法值按各自默认回落（`config.py:818-833`、`881-888`） |
 | `group_enabled` | `false` | 群聊休息闸门总开关；窗内只有含强制词的消息被回复，其余静默且不进主程序（`config.py:836-840`） |
 | `group_mode` | `"all"` | `all`=所有群；`selected`=只对社交白名单中开了「夜间静音」的群（`config.py:841-846`） |
 | `group_night_*`/`group_nap_*` | 同私聊默认值 | 群时间窗，独立于私聊（`config.py:847-862`） |
-| `group_gate_segment_types` | `["sleep","nap"]` | ⚠ `list[str]` 自由文本，无 Literal 校验，拼错静默失效（`config.py:863-872`） |
+| `group_gate_segment_types` | `["sleep","nap"]` | `list[Literal[...]]` 纯选择 8 段型（v1.23.3 起；此前 `list[str]` 自由文本，拼错静默失效）；与私聊同构的时间窗优先（`config.py:863-872`） |
 | `group_force_wake_terms` | 同私聊 12 词 | 群强制唤醒词，独立于私聊词表（`config.py:873-879`） |
 
 #### 2.3.7 `[context]` 被动回复增强（`ContextSettings`，`config.py:891-917`）
@@ -854,7 +854,7 @@ WebUI 保存配置
 
 1. **两套 order 元数据漂移**：根模型字段 `_ui(order)` 与子类 `__ui_order__` 数值不一致（如 `schedule`：11 vs 5、`proactive`：12 vs 6、`news`：15 vs 14），且本机复现证明 SDK 节 Schema 只用子类值——改父字段 order 不产生任何效果（§2.2.5）。
 2. **`enum_labels` 可能到不了界面**：SDK 2.8.0 的节 Schema 生成器不搬运 `enum_labels`/`x-enumNames`（本机复现负结果）；能否显示取决于 Host WebUI 读哪份 Schema，**未确认**。改枚举译名时不要假设它一定生效。
-3. **自由文本列表无校验**：`group_gate_segment_types`（`config.py:863`）与 `creation.allowed_schedule_types`（`config.py:389`）是 `list[str]`，拼错类型名静默失效；对照 `gate_segment_types`、`news.allowed_schedule_types`、`search.allowed_schedule_types` 用 `list[Literal[...]]` 有校验——新增同类字段时优先用 Literal。
+3. **自由文本列表无校验**：`creation.allowed_schedule_types`（`config.py:389`）是 `list[str]`，拼错类型名静默失效；对照 `gate_segment_types`、`news.allowed_schedule_types`、`search.allowed_schedule_types`，以及 v1.23.3 起改为 Literal 的 `group_gate_segment_types`，均用 `list[Literal[...]]` 有校验——新增同类字段时优先用 Literal。
 4. **`llm_model` 是死字段**：`plugin.llm_model`（`config.py:95-102`）全仓库无读取点，仅为兼容旧配置存在；排查"模型没按预期走"时不要看它，看 `[models]` 与 `core/llm_service.py:55-82` 的回退链。
 5. **时间格式零填充**：`_TIME_RE` 只接受 `HH:MM`（`config.py:17`），`8:00` 会被回落默认值；起止相同的时间窗永不生效（`config.py:820` hint 与 `_in_window` 语义一致，见 `life/rest_gate.py:23-24`）。
 6. **QQ 号必须字符串**：TOML 里裸长整数有精度风险（`config.toml.example:15`）；`_qq_id` 允许空串（占位 profile）但拒绝非数字，填错直接 ValidationError。
@@ -1021,7 +1021,7 @@ recall_events / group_user_activity）和 `core/storage.py:473-477`（global_sta
 | `proactive_skip_stats` | `user_id`/`reason`/`day`/`count`，联合主键 | 主动候选跳过原因聚合，供 WebUI「系统与配置」页主动候选诊断 | `record_proactive_skip`（`life/proactive.py:49`、`:70`、`:75`、`:78`、`:80` 等）；过期事件记 `planner_no_reply`（`core/storage.py:1159-1163`） |
 | `rest_backlogs` | `user_id`/`created_at`/`summary`/`consumed`/`source_message_id` | 休息期间积压的用户消息摘要 | `add_rest_backlog`（`plugin.py:1098`）；消费 `consume_rest_backlogs`/`peek_rest_backlogs` |
 | `conversation_continuity` | `user_id` 主键；`intent`/`unresolved_topics`(JSON，≤5 条)/`updated_at` | 连续话题意图与未决话题 | `save_continuity`（`life/continuity.py:24`、`:27`、`:42`、`:44`；`plugin.py:868`、`:889` 清空） |
-| `wake_candidates` | `session_id` 主键；`user_id`/`message_id`/`reason`/`expires_at` | 判醒待醒候选（真实发送才消费） | `set_wake_candidate`/`pop_wake_candidate`（`life/rest_gate.py:120`、`:203`）；`clear_wake_candidate`（`plugin.py`） |
+| `wake_candidates` | `session_id` 主键；`user_id`/`message_id`/`reason`/`expires_at` | 判醒待醒候选（真实发送才消费） | `set_wake_candidate`/`pop_wake_candidate`（`life/rest_gate.py:138`、`:203`）；`clear_wake_candidate`（`plugin.py`） |
 | `group_user_activity` | `(group_id,user_id)` 主键；`display_name`/`last_active_at`/`source_message_id` | 群成员最近活跃（搜索词隐私清洗、群转私素材） | `record_group_activity`（`social/group_observer.py:83`）；撤回清理由 `clear_recalled_group_activity`（`social/group_observer.py`） |
 | `group_directory` | `group_id` 主键；`group_name`/`stream_id`/`updated_at` | 群号↔会话↔名称目录（名称仅展示） | `upsert_group_directory`（`plugin.py:980`、`:1007`；`social/group_observer.py:79`；`social/relay_service.py:46`） |
 
@@ -1570,7 +1570,7 @@ defer = max(floor, latest + BEDTIME_SILENCE_MINUTES*60)
 
 与 `advance` 的配合：defer 未到 → `effective_sleep=False`（`life/life_state.py:88`、
 `life/life_state.py:94`），夜窗前对话未完时她继续回复；`RestGate` 也对 defer 期消息
-直接放行（`life/rest_gate.py:161`，reason `睡前对话未完，暂缓入睡`）。
+直接放行（`life/rest_gate.py:184`，reason `睡前对话未完，暂缓入睡`）。
 每条新消息都把 defer 推后 10 分钟（v1.14.6 需求，docstring `life/bedtime.py:6-8`）。
 **为什么睡眠期/宽限期一律写 0**：被闸门拦下的消息同样会更新 `last_user_message_at`，
 若不排除，入睡点会被这些她根本看不到的消息反复推开（注释 `life/bedtime.py:74-75`）。
@@ -1601,35 +1601,35 @@ defer = max(floor, latest + BEDTIME_SILENCE_MINUTES*60)
 `RestGate.decide` 是私聊消息的判醒入口（调用点 `plugin.py:1093`，在防抖、互动记录、
 连续性/记忆观察之后，`plugin.py:1061-1093`）。
 
-**闸门是否生效 = 时间窗 OR 日程类型**（`life/rest_gate.py:143-152`）：
+**闸门是否生效 = 时间窗优先，日程类型兜底**（`life/rest_gate.py:161-175`，v1.23.3 起）：
 
 - 夜窗 `night_start-night_end`（默认 22:30-08:00）或午休窗 `nap_start-nap_end`
   （默认 12:00-14:30）内**一定**生效——避免默认框架里 leisure/meal 段把闸门静默收窄
-  （注释 `life/rest_gate.py:144-146`）；
-- `gate_segment_types`（默认 `["sleep","nap"]`）列出的段型在**任意时间**也生效。
-  默认含 sleep/nap 意味着日程一进睡眠/午休段闸门就生效，**可能早于夜窗开始**
-  （夜窗设 00:00 而日程 22:30 就寝，则 22:30 起屏蔽，配置文案明示
-  `config.py:806`）；只想按夜窗控制就清空该列表；加入 `rest` 后普通休息段也可能不回复。
+  （注释 `life/rest_gate.py:162-164`）；
+- `gate_segment_types`（默认 `["sleep","nap"]`）是**时间窗未配置（起止相同）时的兜底**；
+  `rest` 等无对应时间窗的类型列出后任意时间生效。**时间窗优先（v1.23.3）**：配了起止不同的
+  夜窗后，日程里的睡眠段不会让闸门提前生效（夜窗设 00:00 而日程 22:30 就寝，则 22:30
+  照常回复——用户实测踩坑后修复）；只想完全按时间窗控制就清空该列表；加入 `rest` 后普通休息段也可能不回复。
 - 两条都不命中 → `(True, "outside_gate_window")` 直接放行且不打日志
-  （`life/rest_gate.py:152`、`life/rest_gate.py:131`）。
+  （`life/rest_gate.py:175`、`life/rest_gate.py:149`）。
 
-**私聊 `_decide` 全部分支**（`life/rest_gate.py:137`，按判定顺序）：
+**私聊 `_decide` 全部分支**（`life/rest_gate.py:155`，按判定顺序）：
 
 | 顺序 | 条件 | 结果 | 行号 |
 | --- | --- | --- | --- |
-| 0 | 窗口起止相同（退化窗） | 先打告警（每小时最多一条），不改变判定 | `life/rest_gate.py:140`、`life/rest_gate.py:56-66` |
-| 1 | `rest_gate.enabled` 为假 | 放行 `disabled` | `life/rest_gate.py:141` |
-| 2 | 文本以 `/` 开头 | 放行 `command`（命令不判醒） | `life/rest_gate.py:142` |
-| 3 | 非夜窗/午休窗且段型不匹配 | 放行 `outside_gate_window` | `life/rest_gate.py:147-152` |
-| 4 | `boundary` 判为勿扰 | **阻断** `BLOCK_REASON`（用户明确希望继续休息），且先于一切窗内分支 | `life/rest_gate.py:156-157`、`life/rest_gate.py:9` |
-| 5 | `sleep_defer_until` 未到 | 放行 `睡前对话未完，暂缓入睡` | `life/rest_gate.py:161` |
-| 6 | `awake_grace_until` 未到 | 放行 `awake_grace` | `life/rest_gate.py:162` |
-| 7 | 无文字且 media 含 image/emoji/gif | 阻断 `夜间媒体消息，不叫醒`（不走概率与模型） | `life/rest_gate.py:164-165` |
-| 8 | `boundary` 判为 wake | 建候选 + 放行，reason 见下 | `life/rest_gate.py:166-168` |
-| 9 | `mode=="llm"` 且任务可用 | LLM 打分判定（见下） | `life/rest_gate.py:172-195` |
-| 10 | `mode=="llm"` 但任务不可用 | 告警并**本轮回退概率模式**（不整夜 fail-closed） | `life/rest_gate.py:169-171` |
-| 11 | 概率模式（或回退后） | `random.random()<=wake_probability`（默认 0.18） | `life/rest_gate.py:197`、`config.py:778` |
-| 12 | 以上任一"允许"路径 | 建待醒候选后放行 | `life/rest_gate.py:198` |
+| 0 | 窗口起止相同（退化窗） | 先打告警（每小时最多一条），不改变判定 | `life/rest_gate.py:158`、`life/rest_gate.py:56-66` |
+| 1 | `rest_gate.enabled` 为假 | 放行 `disabled` | `life/rest_gate.py:159` |
+| 2 | 文本以 `/` 开头 | 放行 `command`（命令不判醒） | `life/rest_gate.py:160` |
+| 3 | 非夜窗/午休窗且段型路径不生效（未列入，或对应时间窗已配置） | 放行 `outside_gate_window` | `life/rest_gate.py:165-175` |
+| 4 | `boundary` 判为勿扰 | **阻断** `BLOCK_REASON`（用户明确希望继续休息），且先于一切窗内分支 | `life/rest_gate.py:179-180`、`life/rest_gate.py:9` |
+| 5 | `sleep_defer_until` 未到 | 放行 `睡前对话未完，暂缓入睡` | `life/rest_gate.py:184` |
+| 6 | `awake_grace_until` 未到 | 放行 `awake_grace` | `life/rest_gate.py:185` |
+| 7 | 无文字且 media 含 image/emoji/gif | 阻断 `夜间媒体消息，不叫醒`（不走概率与模型） | `life/rest_gate.py:187-188` |
+| 8 | `boundary` 判为 wake | 建候选 + 放行，reason 见下 | `life/rest_gate.py:189-191` |
+| 9 | `mode=="llm"` 且任务可用 | LLM 打分判定（见下） | `life/rest_gate.py:195-218` |
+| 10 | `mode=="llm"` 但任务不可用 | 告警并**本轮回退概率模式**（不整夜 fail-closed） | `life/rest_gate.py:192-194` |
+| 11 | 概率模式（或回退后） | `random.random()<=wake_probability`（默认 0.18） | `life/rest_gate.py:220`、`config.py:778` |
+| 12 | 以上任一"允许"路径 | 建待醒候选后放行 | `life/rest_gate.py:221` |
 
 **`boundary` 三分类**（`life/rest_gate.py:29`，输入先去空白转小写）：
 
@@ -1642,7 +1642,7 @@ defer = max(floor, latest + BEDTIME_SILENCE_MINUTES*60)
    → `wake`，reason `明确叫醒、紧急或安全需要`（`life/rest_gate.py:38-39`）；
 4. 其余 → `judge`（`life/rest_gate.py:40`）。
 
-**LLM 模式判定**（`life/rest_gate.py:172-195`）：模型返回
+**LLM 模式判定**（`life/rest_gate.py:195-218`）：模型返回
 `{importance, explicit_wake, emotional_need, safety_risk, do_not_disturb, score,
 should_reply, reason}`，各分数钳 0-100。判定优先级：
 
@@ -1650,12 +1650,12 @@ should_reply, reason}`，各分数钳 0-100。判定优先级：
 - `max(explicit_wake, safety_risk) >= llm_threshold` → 放行；
 - 否则 `should_reply and score >= llm_threshold` → 放行，否则继续睡；
 - 模型失败时保持睡眠（fallback 传 `{}`，所有 value() 归 0，注释
-  `life/rest_gate.py:173`）。
+  `life/rest_gate.py:196`）。
 
-reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放行留痕
-（`disabled`/`command`/`outside_gate_window` 除外，`life/rest_gate.py:131-134`）——
+reason 字符串带全部分数（`life/rest_gate.py:217`），`decide` 对放行留痕
+（`disabled`/`command`/`outside_gate_window` 除外，`life/rest_gate.py:149-152`）——
 否则"夜里还在回消息"无法区分是 defer/宽限/唤醒词还是概率放行（注释
-`life/rest_gate.py:129-130`）。
+`life/rest_gate.py:147-148`）。
 
 **被阻断消息的后续**（`plugin.py:1094-1104`）：非 `BLOCK_REASON` 的阻断写一次性
 `rest_backlogs`（次日可能主动提起），`BLOCK_REASON` **不进 backlog**——避免次日
@@ -1668,14 +1668,15 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 `_warn_degenerate_window` 每小时最多告警一次（实例属性 `_window_warned_at` 节流，
 `life/rest_gate.py:56-66`），并提示"如需整夜生效请把结束时间设为起床时间（如 08:00）"。
 
-**群聊闸门 `decide_group`**（`life/rest_gate.py:92`，与私聊完全独立的轻量版）：
+**群聊闸门 `decide_group`**（`life/rest_gate.py:105`，与私聊完全独立的轻量版）：
 总闸 `group_enabled` → 分群开关 → 时间窗或段型 → 强制词放行/勿扰词阻断/其余静默
-（`life/rest_gate.py:101-114`）。**不放行概率、不建待醒候选、不写积压**，每条群消息
-独立判定，被阻断消息不进入主程序（注释 `life/rest_gate.py:95-97`）。
+（`life/rest_gate.py:115-132`）。**不放行概率、不建待醒候选、不写积压**，每条群消息
+独立判定，被阻断消息不进入主程序（注释 `life/rest_gate.py:108-110`）。
 分群开关 `group_gate_enabled_for`：`group_mode=="all"`（默认）对所有群生效；
 `"selected"` 只对社交白名单内且打开「夜间静音」的群生效（`life/rest_gate.py:76-90`）。
 群窗/群段型/群强制词都是独立配置（`config.py:847-879`），其中
-`group_gate_segment_types` 是 `list[str]` 而非 Literal，可配任意段型
+`group_gate_segment_types` v1.23.3 起为 `list[Literal[...]]` 纯选择（8 个段型），
+与私聊同构的时间窗优先：群时间窗配了起止时间后，窗外睡眠/午休段不静默
 （`config.py:863`，UI 枚举 `config.py:870-872`）。
 
 容易踩的坑：
@@ -1686,10 +1687,10 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
   判定顺序见 `life/rest_gate.py:32-35` 与 `life/rest_gate.py:36`，词表默认值
   `config.py:812`。
 - 段型触发依赖 `context["current"]` 非空；框架有空档时 `current=None`，
-  `segment_kind=""`，只剩时间窗一条路（`life/rest_gate.py:150-151`）。
+  `segment_kind=""`，只剩时间窗一条路（`life/rest_gate.py:168-169`）。
 - LLM 判为 do_not_disturb 而阻断的消息，reason 是 `llm:...` 而非 `BLOCK_REASON`，
   **会进 backlog**——只有正则勿扰词才豁免（`plugin.py:1096`）。
-- 概率分支用 `<=`（`life/rest_gate.py:197`）而做梦门用 `<`
+- 概率分支用 `<=`（`life/rest_gate.py:220`）而做梦门用 `<`
   （`life/life_state.py:205`），两者对 p=0/1 都有短路保护，不一致只是历史写法，
   没有实际差异。
 
@@ -1699,13 +1700,13 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 
 1. **第一段（决策留痕）**：`_decide` 允许时 `_candidate` 往 `wake_candidates` 写一行
    （`session_id, user_id, message_id, reason, created_at, expires_at`，
-   `life/rest_gate.py:116-122`，SQL `core/storage.py:1213`）。生命周期
+   `life/rest_gate.py:134-140`，SQL `core/storage.py:1213`）。生命周期
    `max(900, turn_expire_seconds*3)` 秒——要覆盖 planner+replyer 两级模型与发送排队，
    默认 900s（`turn_expire_seconds` 默认 120，`config.py:969`；注释
-   `life/rest_gate.py:118`）。同一 session 是 `INSERT OR REPLACE`，新候选覆盖旧的。
+   `life/rest_gate.py:136`）。同一 session 是 `INSERT OR REPLACE`，新候选覆盖旧的。
 2. **第二段（提交）**：平台确认发送成功后调 `commit_for_send(session, now, message_id)`
    → `pop_wake_candidate`（要求 message_id 匹配且未过期，`core/storage.py:1222`） →
-   `mark_woken`（`life/rest_gate.py:203-205`）。
+   `mark_woken`（`life/rest_gate.py:226-228`）。
 
 `mark_woken`（`life/life_state.py:261`）做的事：相位 `woken`、
 `awake_grace_until = now + awake_grace_minutes*60`（默认 30 分钟，`config.py:794`）、
@@ -1719,7 +1720,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 （`plugin.py:1616-1620`，条件 `not active_attribution`；无确认锚点的路径在
 `plugin.py:1588-1591`，发送失败清候选在 `plugin.py:1593-1594`）。
 
-与相位机的配合：`mark_woken` 后宽限内消息直接放行（`life/rest_gate.py:162`），
+与相位机的配合：`mark_woken` 后宽限内消息直接放行（`life/rest_gate.py:185`），
 宽限内不会重新入睡（`life/life_state.py:86`、`life/life_state.py:94`）；
 宽限到期后若 `BedtimeManager` 先跑且仍在休息窗 → `mark_resleep` 回睡
 （`life/bedtime.py:98`），否则 `advance` 自然转 `awake`（`life/life_state.py:121-124`）。
@@ -1729,7 +1730,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 - `pop_wake_candidate` 在 message_id 不匹配时返回 `{}` 并顺手清掉本 session 的过期行
   （`core/storage.py:1235-1238`）——提交时传错 message_id 会静默不叫醒。
 - `commit_for_send` 是幂等终点：候选被消费后不存在，重复调用返回 False
-  （`life/rest_gate.py:204`），平台重投不会二次扣能量。
+  （`life/rest_gate.py:227`），平台重投不会二次扣能量。
 - `mark_woken` 直接扣 3 点精力且不看当前是否已在睡——测试替身
   `tests/support.py:85-87` 是空实现，别以它推断真实行为。
 
@@ -1742,7 +1743,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 | `rest_gate.wake_probability` | `0.18` | 概率模式普通消息叫醒概率 | `config.py:778` |
 | `rest_gate.llm_threshold` | `70` | LLM 分数阈值 | `config.py:786` |
 | `rest_gate.awake_grace_minutes` | `30` | 叫醒宽限；也决定回睡计时起点 | `config.py:794` |
-| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 任意时间也生效的段型 | `config.py:802` |
+| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 窗口未配置时兜底的段型 + 无窗口类型开关 | `config.py:802` |
 | `rest_gate.force_wake_terms` | 见上 | 强制唤醒词表 | `config.py:811` |
 | `rest_gate.night_start/night_end` | `22:30`/`08:00` | 夜窗，支持跨午夜 | `config.py:818`、`config.py:822` |
 | `rest_gate.nap_start/nap_end` | `12:00`/`14:30` | 午休窗 | `config.py:826`、`config.py:830` |
@@ -1789,7 +1790,7 @@ reason 字符串带全部分数（`life/rest_gate.py:194`），`decide` 对放�
 | ① 收口与路由 | `plugin.py:936` `on_receive` | 识别撤回通知 / 手滑命令 / 群私聊归属 | 返回 `abort`，Host 不再把消息送进主程序 |
 | ② 防抖合并 | `messaging/message_pipeline.py:292` `MessageDebouncer.collect` | 把连续补话合并成一条 `merged` 消息 | 输家返回 `superseded`，调用方必须 `abort` |
 | ③ 群轮次 / 私聊运行态 | `plugin.py:974` `_process_group_message`、`plugin.py:1043` `_process_private_message` | 群轮次表 `_group_turns` / 私聊 `_session_runtime` | 未登记 → Replyer 拿不到归因，输出被静默 |
-| ④ 休息闸门 | `life/rest_gate.py:124` `RestGate.decide` / `life/rest_gate.py:92` `decide_group` | 放行 / 阻断 / 建「待醒」候选 | 阻断 → 只写 backlog，不产生 Planner/Replyer 请求 |
+| ④ 休息闸门 | `life/rest_gate.py:142` `RestGate.decide` / `life/rest_gate.py:105` `decide_group` | 放行 / 阻断 / 建「待醒」候选 | 阻断 → 只写 backlog，不产生 Planner/Replyer 请求 |
 | ⑤ Planner + Replyer | `plugin.py:1237` `on_planner`、`plugin.py:1288` `on_replyer`、`plugin.py:1323` `on_replyer_after` | 注入背景、抑制输出、建立发送确认记录 | 抑制 → `response=""`，Host 不发送 |
 | ⑥ 发送确认 | `plugin.py:1447` `on_send_before`、`plugin.py:1539` `on_send_after` | 撤回墓碑复核、预留/释放、醒来与主动额度结算 | `abort` → 平台不发出；`sent=False` → 释放全部预留 |
 
@@ -1976,13 +1977,13 @@ waiter result: False superseded   # 撤回的是窗口里唯一一条 → 整轮
 
 #### 5.5.1 休息闸门在管线中的位置
 
-私聊 `RestGate.decide`（`life/rest_gate.py:124-199`）与群聊 `decide_group`（`life/rest_gate.py:92-114`）的**全部分支、两条触发路径（时间窗 OR 日程类型）、boundary 三分类、LLM 判定与退化窗告警详见 §4.7**，本章只强调管线视角的三个事实：
+私聊 `RestGate.decide`（`life/rest_gate.py:142-222`）与群聊 `decide_group`（`life/rest_gate.py:105-132`）的**全部分支、触发路径（时间窗优先、日程类型兜底）、boundary 三分类、LLM 判定与退化窗告警详见 §4.7**，本章只强调管线视角的三个事实：
 
 - 私聊闸门在互动记录与后台观察**之后**调用（`plugin.py:1093`）——被阻断的消息仍然已经进了互动历史与记忆观察，只是不进 Planner/Replyer；
 - 群闸门在群轮次登记**之前**调用（`plugin.py:1010-1020`），阻断即 `abort`，不产生任何主程序请求；
 - `commit_for_send` 只在**平台确认发送成功后**消费候选，而且只在非主动/非转述的普通被动回复路径调用（`plugin.py:1590-1592`、`plugin.py:1617-1620`）。主动任务不会改变休息状态。
 
-**为什么群聊要轻量**：`life/rest_gate.py:94-98` 的注释——被阻断的消息不进入主程序，因此不产生 Planner/Replyer/VLM 等请求。群消息频率高，概率放行和候选机制在群里没有意义。
+**为什么群聊要轻量**：`life/rest_gate.py:107-111` 的注释——被阻断的消息不进入主程序，因此不产生 Planner/Replyer/VLM 等请求。群消息频率高，概率放行和候选机制在群里没有意义。
 
 ### 5.6 Planner 注入：`on_planner`
 
@@ -2433,13 +2434,13 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 | `rest_gate.wake_probability` | `0.18` | 概率模式叫醒率 |
 | `rest_gate.llm_threshold` | `70` | LLM 阈值 |
 | `rest_gate.awake_grace_minutes` | `30` | 醒来缓冲 |
-| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 额外生效日程类型 |
+| `rest_gate.gate_segment_types` | `["sleep","nap"]` | 窗口未配置时兜底的日程类型 |
 | `rest_gate.force_wake_terms` | 12 词 | 强制唤醒词（同时被防抖读取） |
 | `rest_gate.night_start/end` | `22:30` / `08:00` | 夜窗（跨午夜） |
 | `rest_gate.nap_start/end` | `12:00` / `14:30` | 午休窗 |
 | `rest_gate.group_enabled` | `False` | 群闸门总开关 |
 | `rest_gate.group_mode` | `all` | all / selected |
-| `rest_gate.group_gate_segment_types` | `["sleep","nap"]` | 群额外生效类型 |
+| `rest_gate.group_gate_segment_types` | `["sleep","nap"]` | 群窗口未配置时兜底类型（Literal 纯选择） |
 | `rest_gate.group_force_wake_terms` | 12 词 | 群强制唤醒词（独立词表） |
 | `context.enabled` | `True` | 被动回复增强（`config.py:897`） |
 | `context.owner_only_terms` | 4 词 | 朋友回复禁用称呼 |
@@ -2452,7 +2453,7 @@ _merge → additional_config.mai_life_merged_message_ids   (messaging/message_pi
 1. **`collect` 返回 `allowed=False` 必须 `abort`**。两条快速补话会产生两个 `collect` 调用，输家返回 `superseded`；不 abort 就是重复回复（本机实测：`t1: False superseded`）。
 2. **群防抖键与群轮次 scope 形状不同**。前者 `group:{platform}:{group_id or session}:{uid}` 永不空（`messaging/message_pipeline.py:169`），后者在 `group_id`/`user_id` 缺失时返回空串（`plugin.py:804`），导致取消逻辑静默失效。
 3. **`night_start == night_end` = 窗口永假**，只剩日程类型一条路，用户完全看不出来——完整说明与告警机制见 §4.7。
-4. **`gate_segment_types` 默认含 sleep/nap**，闸门可能早于夜窗生效（`config.py:806` 配置文案自己写明了）；详见 §4.7。
+4. **`gate_segment_types` 默认含 sleep/nap**：v1.23.3 前闸门可能早于夜窗生效（用户实测踩坑后已改为时间窗优先），现在只有夜窗/午休窗起止相同（停用）时才回退该列表兜底；详见 §4.7。
 5. **`plain_text` 与 `direct_text` 语义不同**，前者展开合并转发、后者只读顶层。控制逻辑一律用 `direct_text`，否则合并转发里的原话会被当成指令（`messaging/message_pipeline.py:49`）。
 6. **合并后 `message_id` 是最后一条的**，撤回取消必须走 `mai_life_merged_message_ids` → `message_turn_sources` 链条。
 7. **`_is_recalled` 存储异常时失败开放**（`plugin.py:852-856`），别把 `return False` 当 bug。
@@ -3303,7 +3304,7 @@ cd /d/workdoc/plugin && python /tmp/mlverify/<script>.py
 
 产物：`relay_candidates` 一条 `kind="group_to_private"`（relay_id `grp-…`，2 小时过期）+ `proactive_opportunities` 一条（`privacy="group_public"`，权重 `min(0.85, max(0.7, score))`——刻意高于日常场景契机，避免被普通日程挤占；`reason` 固定声明"不得转述群友身份、原句或群聊隐私"）（`social/group_observer.py:222-242`）。
 
-**容易踩的坑**：观察侧的静音窗判断 `_group_quiet_now` 只读 `rest_gate.group_enabled` 与四个时间字段，**不读** `group_mode`、`group_gate_segment_types` 和每群的 `rest_gate_enabled`——后者只影响回复闸门（`life/rest_gate.py:79-108`）。也就是说 `group_mode="selected"` 且没有任何群打开"夜间静音"时，群观察在时间窗内依旧暂停。这是读码所见的行为，设计意图**未确认**（观察侧 docstring 只解释"夜间无 Planner 消费这些摘要"）。
+**容易踩的坑**：观察侧的静音窗判断 `_group_quiet_now` 只读 `rest_gate.group_enabled` 与四个时间字段，**不读** `group_mode`、`group_gate_segment_types` 和每群的 `rest_gate_enabled`——后者只影响回复闸门（`life/rest_gate.py:79-126`）。也就是说 `group_mode="selected"` 且没有任何群打开"夜间静音"时，群观察在时间窗内依旧暂停。这是读码所见的行为，设计意图**未确认**（观察侧 docstring 只解释"夜间无 Planner 消费这些摘要"）。
 
 #### 显式转述 RelayService
 
@@ -3554,7 +3555,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 | 3 | 防抖合并 | `plugin.py:1061` `MessageDebouncer.collect` | 连续补话合并成一条 `merged`；异常失败开放（`plugin.py:1061-1064`） | `allowed=False` → **必须 abort**（§5.3.5） |
 | 4 | 合并后登记 | `plugin.py:1071-1076` | 重取身份、`register_turn(merged)`、`_discard_recalled_private_turn` | 已撤回 → abort |
 | 5 | 互动与观察 | `plugin.py:1078-1090` | `record_interaction`（纯空消息不写）；spawn `continuity.refresh` 与 `memory.observe_message`（与来源消息绑定，支持撤回取消） | 后台任务异常只进日志 |
-| 6 | 休息闸门 | `plugin.py:1093` `RestGate.decide` | 时间窗 OR 日程类型触发；概率/LLM 判醒；建待醒候选（§4.7） | 阻断 → 非 `BLOCK_REASON` 写 `rest_backlogs` 后 abort |
+| 6 | 休息闸门 | `plugin.py:1093` `RestGate.decide` | 时间窗优先、日程类型兜底；概率/LLM 判醒；建待醒候选（§4.7） | 阻断 → 非 `BLOCK_REASON` 写 `rest_backlogs` 后 abort |
 | 7 | 运行态落账 | `plugin.py:1117-1131` | `_detect_moment_signal`（3.2s 预算，§11.5）；写 `_session_runtime`；`_cancel_reply_confirmations`；`note_inbound` + `_supersede_active_task`（真实入站优先于未发送的主动轮） | 命令/阻断/未配置用户不写 |
 | 8 | Planner 注入 | `plugin.py:1237` `on_planner` | `_activate_planner_task` 映射虚拟任务（`plugin.py:707-754`）；suffix 七项按序拼接（`plugin.py:1245-1274`）；写入 `items`/`messages`（§5.6） | 群被动轮跳过私聊背景 |
 | 9 | Planner 记账 | `plugin.py:1278` `on_planner_after` | OBSERVE，`record_observed(source="host_planner")` | 异常不影响主链 |
@@ -3576,7 +3577,7 @@ scope 白名单在 `management/admin_service.py:13`：`overview`、`users`、`gr
 | 用户校验 | `get_user` 必须已配置且启用（`plugin.py:1053-1055`） | 无档案要求，任何发言者都处理 |
 | 防抖默认 | `debounce.enabled=True` | `debounce.group_enabled=False`（`config.py:931`） |
 | 轮次机制 | `_session_runtime[session]` 单会话 | `_group_turns[(session, mid)]` + `turn_scope` 按「群+发送者」隔离（`plugin.py:1021-1032`） |
-| 闸门 | 概率/LLM 判醒、建候选、写积压（§4.7） | `decide_group` 轻量版：强制词放行/勿扰阻断/其余静默，不建候选不写积压（`life/rest_gate.py:92-114`） |
+| 闸门 | 概率/LLM 判醒、建候选、写积压（§4.7） | `decide_group` 轻量版：强制词放行/勿扰阻断/其余静默，不建候选不写积压（`life/rest_gate.py:105-132`） |
 | 背景注入 | 完整生活背景 | 群轮次命中时**不注入任何私聊背景**（`plugin.py:1294-1296`） |
 | 唤醒 | 普通被动回复成功后叫醒 | 群消息不改变休息状态（`commit_for_send` 仅在非主动/非转述的普通私聊被动路径调用，`plugin.py:1617-1620`） |
 
@@ -3711,12 +3712,12 @@ _creation_loop（plugin.py:456-466，默认 60min；禁用时 300s 空转）
 
 用户发消息（夜窗内）
   → RestGate.decide（plugin.py:1093）：
-      时间窗 OR 日程类型命中（life/rest_gate.py:147-152）
-      → defer 未到 → 放行「睡前对话未完，暂缓入睡」（life/rest_gate.py:161）
+      时间窗优先、日程类型兜底命中（life/rest_gate.py:165-175）
+      → defer 未到 → 放行「睡前对话未完，暂缓入睡」（life/rest_gate.py:184）
       → boundary 分类：强制词 > 勿扰词 > 紧急词（life/rest_gate.py:29-40）
-      → 概率或 LLM 判醒 → 建待醒候选（life/rest_gate.py:116-122）
+      → 概率或 LLM 判醒 → 建待醒候选（life/rest_gate.py:134-140）
   → 回复真正发送成功 → commit_for_send → mark_woken（§4.8）
-  → 宽限 30 分钟内消息直接放行、不重新入睡（life/rest_gate.py:162、life/life_state.py:86）
+  → 宽限 30 分钟内消息直接放行、不重新入睡（life/rest_gate.py:185、life/life_state.py:86）
 ```
 
 **为什么 bedtime 是独立 60 秒循环而不并入 10 分钟维护 tick**：`defer` 必须新鲜——10 分钟级的 tick 会在静默刚达标时误拦仍在进行的对话（注释 `plugin.py:424`）。**为什么协商与闸门共用同一套开关和夜窗**：夜窗一致性要求（docstring `life/bedtime.py:10-11`），用户改 `night_start` 两个流程必须一起变。
@@ -3824,15 +3825,15 @@ drawpic 2.1.1 另有 16 个 public @API（interfaces/api/ 下 integration/tasks_
 
 `webui.json` 的 `schema_version: 2`（`webui.json:2`）不是普通版本号：协议 1 的声明会被宿主**整插件注册拒绝**（`docs/webui-extension.md:5`）。协议 2 相对 1 是破坏性变更——移除了 `repeat`/`gallery`/`upload` 组件与 `scope:"item"`，新增 `progress`/`image` 组件、custom HTML 页面与 `required_capabilities`（`docs/webui-extension.md:5`、`:70`）。实际约束：7 页全部只读、每页 ≤200 组件（system 页已用 185）、文件 114.2 KiB / 128 KiB、每插件并发 2、API 超时 10 秒、响应 ≤512 KiB（§9.3、§9.7）。宿主契约的权威来源在 MaiBot 仓库（协议文档与 WebUI schema 校验模块），本仓库内的 docs 只是转述——**未读宿主源码，未确认**。
 
-#### 12.1.2 两条闸门触发路径（时间窗 OR 日程类型）
+#### 12.1.2 闸门触发路径（时间窗优先，日程类型兜底）
 
-休息闸门的生效条件是一条跨模块的 OR：**夜窗/午休窗内一定生效，或当前日程段型在 `gate_segment_types` 里也生效**（`life/rest_gate.py:147-152`）。三条必须记住的后果：
+休息闸门的生效条件：**夜窗/午休窗内一定生效；`gate_segment_types` 是时间窗未配置（起止相同）时的兜底，`rest` 等无对应时间窗的类型列出后任意时间生效**（`life/rest_gate.py:161-175`，v1.23.3 起时间窗优先）。三条必须记住的后果：
 
-- 默认 `gate_segment_types=["sleep","nap"]` 意味着日程一进睡眠段闸门就生效，**可能早于夜窗开始**（配置文案自己写明了，`config.py:806`）；
+- 默认 `gate_segment_types=["sleep","nap"]`：配了起止不同的夜窗后，日程睡眠段**不会**让闸门提前生效（v1.23.3 修复了“夜窗设 00:00 而日程 22:30 就寝、22:30 起即被屏蔽”的实测踩坑）；夜窗起止相同（停用）时才回退该列表兜底；
 - `night_start == night_end` 让该窗口永假，只剩段型一条路，用户完全看不出来（每小时一条告警，`life/rest_gate.py:42-66`）；
-- 框架有空档时 `current=None`、段型为空，又只剩时间窗一条路（`life/rest_gate.py:150-151`，§4.7）。
+- 框架有空档时 `current=None`、段型为空，又只剩时间窗一条路（`life/rest_gate.py:168-169`，§4.7）。
 
-同一个 OR 结构还决定了睡前协商（defer）与群观察静音窗的边界（§11.2、§8.6）。
+睡前协商（defer）与群观察静音窗的边界见 §11.2、§8.6（群观察只读时间窗，不读段型列表）。
 
 #### 12.1.3 模型通道依赖
 
@@ -3842,7 +3843,7 @@ drawpic 2.1.1 另有 16 个 public @API（interfaces/api/ 下 integration/tasks_
 - **结构化任务默认走快模型是防超时设计**：慢推理模型生成 JSON 日程要 27-30 秒，会撞穿 Host 30 秒 `cap.call` 超时（`core/llm_service.py:62-64`）。
 - **SDK 版本分歧**：SDK 2.8.1+ 必须显式传 `task_name` 且 `model` 传空串，更旧 SDK 的 `model` 即任务名（`core/llm_service.py:24-46`）；部署环境实际版本在 2.7.0–2.99.99 之间（`_manifest.json:17-18`），**未确认**。
 - **`max_output_tokens=0` 是刻意的**：不下发字段、由服务商决定；写死小上限会把推理模型的正文挤成空响应（§3.7）。
-- **无模型时的降级全景**：日程/梦境/创作走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`、`creation/creation_service.py:21-32`），判醒 LLM 模式回退概率（`life/rest_gate.py:169-171`），日期模型兜底默认关闭（`config.py:586`）。叙事任务无模型时 WebUI 会明确告知是占位内容（`plugin.py:2207-2210`）。
+- **无模型时的降级全景**：日程/梦境/创作走本地兜底（`life/schedule_service.py:274`、`life/life_state.py:220`、`creation/creation_service.py:21-32`），判醒 LLM 模式回退概率（`life/rest_gate.py:192-194`），日期模型兜底默认关闭（`config.py:586`）。叙事任务无模型时 WebUI 会明确告知是占位内容（`plugin.py:2207-2210`）。
 
 #### 12.1.4 测试环境与验证方法（本仓库的现实）
 

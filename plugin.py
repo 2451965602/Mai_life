@@ -1,4 +1,4 @@
-"""Mai_life v1.23.2 插件入口。"""
+"""Mai_life v1.23.3 插件入口。"""
 from __future__ import annotations
 
 from datetime import date,datetime,timedelta
@@ -1948,8 +1948,8 @@ class MaiLifePlugin(MaiBotPlugin):
     def _sleep_kind_zh(self,phase:str,segment:dict[str,Any],now:Any)->str:
         """休息闸门的"类型"中译：夜间睡眠/午休/普通休息；未在休息时显式"清醒"。
 
-        与 RestGate.decide 同一套判定：日程 kind 命中 gate_segment_types 时用它细化，
-        否则按夜窗/午休窗推断（night→sleep、nap→nap）。
+        日程 kind 命中 gate_segment_types 时用它细化，否则按夜窗/午休窗推断
+        （night→sleep、nap→nap）；只描述生活状态类型，与闸门此刻是否生效无关。
         """
         if phase not in _SLEEPING_PHASES:return "清醒"
         gate=self.config.rest_gate; kind=str(segment.get("kind") or "")

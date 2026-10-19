@@ -12,7 +12,7 @@ import re
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import ValidationInfo, field_validator, model_validator
 
-PLUGIN_VERSION = "1.23.2"
+PLUGIN_VERSION = "1.23.3"
 CONFIG_SCHEMA_VERSION = "1.11.0"
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
@@ -803,8 +803,8 @@ class RestGateSettings(PluginConfigBase):
         default_factory=lambda: ["sleep", "nap"],
         description="哪些日程类型启用休息回复闸门。",
         json_schema_extra=_ui(
-            "闸门生效的日程类型", "夜窗/午休窗内闸门一定生效；这里列出的日程类型在任意时间也会生效。注意默认含 sleep/nap：日程一进入睡眠/午休段闸门就生效，可能早于夜窗开始时间（如夜窗设 00:00 而日程 22:30 就寝，22:30 即开始屏蔽）；只想按夜窗控制就清空本列表。加入 rest 后，普通休息段也可能不回复。", 5,
-            label_en="Gated Schedule Types", hint_en="Night/nap windows always gate; listed segment types gate at any time. Adding rest also gates ordinary rest periods.",
+            "闸门生效的日程类型", "夜窗/午休窗内闸门一定生效；本列表是时间窗未配置（起止相同）时的兜底，rest 等无对应时间窗的类型列出后任意时间生效。注意：配了起止不同的夜窗后，日程里的睡眠段不会让闸门提前生效（夜窗设 00:00 而日程 22:30 就寝，22:30 照常回复）；只想完全按时间窗控制就清空本列表。加入 rest 后，普通休息段也可能不回复。", 5,
+            label_en="Gated Schedule Types", hint_en="Night/nap windows always gate; this list is the fallback when a window is unset, plus kinds with no window. Adding rest also gates ordinary rest periods.",
             enum_labels={"sleep": "夜间睡眠（sleep）", "nap": "午休小睡（nap）", "rest": "普通休息（rest）"},
         ),
     )
@@ -860,13 +860,13 @@ class RestGateSettings(PluginConfigBase):
         default="14:30", description="群午休闸门结束时间。",
         json_schema_extra=_ui("群午休闸门结束", "默认 14:30。", 14, label_en="Group Nap End", hint_en="Group nap window end in HH:MM format."),
     )
-    group_gate_segment_types: list[str] = Field(
+    group_gate_segment_types: list[Literal["sleep", "nap", "rest", "study", "work", "leisure", "meal", "travel"]] = Field(
         default_factory=lambda: ["sleep", "nap"],
-        description="哪些日程类型在任意时间也触发群闸门（与群时间窗 OR）。",
+        description="哪些日程类型在群时间窗未配置（起止相同）或该类型无对应时间窗时触发群闸门（与群时间窗 OR）。",
         json_schema_extra=_ui("群闸门生效的日程类型",
-            "群夜窗/午休窗内一定生效；这里列出的类型在任意时间也生效。默认与私聊一致：夜间睡眠+午休。", 16,
+            "群夜窗/午休窗内一定生效；本列表是群时间窗未配置（起止相同）时的兜底，rest 等无对应窗口的类型列出后任意时间生效。默认与私聊一致：夜间睡眠+午休。", 16,
             label_en="Group Gated Schedule Types",
-            hint_en="Group quiet windows always gate; listed segment kinds gate at any time."),
+            hint_en="Group quiet windows always gate; this list is the fallback when the matching window is unset, plus kinds with no window."),
         enum_labels={"sleep": "夜间睡眠（sleep）", "nap": "午休小睡（nap）", "rest": "普通休息（rest）",
                      "study": "学习（study）", "work": "工作（work）", "leisure": "休闲（leisure）",
                      "meal": "餐饮（meal）", "travel": "出行（travel）"})
